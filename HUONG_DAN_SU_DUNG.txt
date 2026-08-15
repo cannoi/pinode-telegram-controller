@@ -1,0 +1,149 @@
+﻿================================================================================
+  PI NODE TELEGRAM CONTROLLER PRO — HƯỚNG DẪN ĐẦY ĐỦ
+  Theo dõi · Cảnh báo · Bảo trì Pi Node qua Telegram
+================================================================================
+
+1. ỨNG DỤNG NÀY LÀM GÌ?
+-----------------------
+Đây là “trợ lý” chạy trên máy Windows có Pi Node. Nó:
+
+  • Theo dõi Node có ổn không (đồng bộ, cổng, Docker, RAM, CPU, nhiệt độ…)
+  • Gửi tin nhắn Telegram khi có lỗi — không cần ngồi canh máy
+  • Tự quét định kỳ; lỗi nặng (đồng bộ/port) có thể tự reset mạng + Docker
+  • Cho phép điều khiển từ xa: dọn RAM, bảo trì, chụp màn hình, hỏi AI…
+
+Đối tượng: người chạy Pi Node (kể cả ít rành máy tính) muốn yên tâm hơn.
+
+
+2. CẦN CHUẨN BỊ GÌ?
+-------------------
+  A) Máy Windows đã cài Pi Node + Docker (khuyến nghị)
+  B) Telegram trên điện thoại
+  C) Hai loại Key (miễn phí):
+
+     ① Bot Telegram
+        - Mở: https://t.me/BotFather
+        - Gõ /newbot → đặt tên → nhận TOKEN dạng: 123456:ABC-DEF...
+        - Gửi tin bất kỳ cho bot vừa tạo (để bot “biết” bạn)
+        - Lấy Chat ID: nhắn cho @userinfobot hoặc mở
+          https://api.telegram.org/bot<TOKEN>/getUpdates
+          sau khi đã nhắn bot, tìm "chat":{"id": SỐ }
+
+     ② API AI Google (để /monitor đọc được số trên PiCheck)
+        - Mở: https://aistudio.google.com/apikey
+        - Đăng nhập Google → Create API key → copy key
+
+
+3. CÀI ĐẶT NHANH (5–10 PHÚT)
+----------------------------
+  1. Giải nén thư mục app vào ổ đĩa (vd: C:\PiNode\PiNode Telegram Controller PRO Official)
+  2. Chuột phải Start_Controller.bat → Run as administrator (lần đầu khuyến nghị)
+  3. Chọn [1] hoặc [3] để nhập Key:
+        - Telegram Bot Token
+        - Chat ID
+        - Gemini API Key
+        - Phút quét (mặc định 60) · ngưỡng RAM (mặc định 88)
+     Nhấn Enter = giữ giá trị cũ / mặc định
+  4. Chọn chạy Controller
+  5. Telegram sẽ nhận menu mở đầu (1 lần) + QR ủng hộ (1 lần)
+  6. Gửi /status hoặc /monitor để thử
+
+
+4. CÁC LỆNH TELEGRAM
+--------------------
+  TÌNH TRẠNG
+    /status      Xem Node ổn hay cần xem (nhanh, lấy dữ liệu lần quét gần nhất)
+    /monitor     Kiểm tra ngay: đưa PiCheck lên, chụp, AI đọc số
+    /report      Báo cáo 24 giờ
+    /scheduler   Xem lịch tự động
+
+  BẢO TRÌ
+    /cleanram    Dọn RAM: tắt app rác, xóa Temp, flush DNS
+                 KHÔNG tắt Pi Node / Docker
+    /maintenance Bảo trì tuần (cần /confirm): dọn rác, Docker prune,
+                 anti-sleep, TRIM, SFC đầu tháng nếu đúng lịch
+    /reset       Reset mạng + Node (cần /confirmreset):
+                 troubleshoot mạng, gắn IP tĩnh = IP đang dùng,
+                 mở port 31401–31410, reset Docker/WSL
+                 Dùng khi không đồng bộ / port đóng / lỗi mạng
+    /diagnostic  Chẩn đoán nhanh
+    /cancel      Hủy lệnh đang chờ xác nhận
+
+  HỆ THỐNG
+    /docker · /disk · /logs · /screenshot
+
+  KHÁC
+    /ask <câu hỏi>  Hỏi Hermes AI (nếu đã cấu hình)
+    /donate         Gửi lại QR ủng hộ
+    /help           Menu lệnh
+
+
+5. VIỆC TỰ ĐỘNG (KHÔNG CẦN BẤM)
+-------------------------------
+  • Mỗi 60 phút: quét Node (im lặng nếu ổn)
+  • Khi phát hiện lỗi: báo Telegram + quét lại mỗi 10 phút
+  • Lỗi đồng bộ / port / mạng liên tiếp 3 lần: tự chạy /reset
+  • 07:00 và 18:00: gửi báo cáo 24 giờ
+  • Chủ nhật 23:00: bảo trì tuần (im lặng nếu thành công)
+
+
+6. GỢI Ý SỬ DỤNG HÀNG NGÀY
+--------------------------
+  • Để PiCheck và Pi Desktop mở (hoặc có thể mở khi /monitor)
+  • Nên chạy Controller bằng Start_Controller.bat hoặc cài task
+    (Install_Controller_Task.bat) để tự chạy khi bật máy
+  • Khi Node báo đỏ: đọc tin cảnh báo → /monitor → nếu vẫn lỗi /reset
+  • /cleanram khi máy nặng RAM; /maintenance khoảng 1 lần/tuần nếu muốn thủ công
+
+
+7. CẤU TRÚC THƯ MỤC
+-------------------
+  Start_Controller.bat     Mở app (menu nhập Key / chạy)
+  Setup_Config.bat         Chỉ nhập Key
+  Stop_Controller.bat      Dừng app
+  Config\PiNode_Config.ps1 Token, Chat ID, API, lịch, đường dẫn script
+  Controller\...ps1        Bộ não bot
+  Data\                    CleanRAM, Maintenance, Reset, SmartMonitor…
+  Logs\                    Log lỗi / hoạt động
+  State\                   Trạng thái lịch, cờ welcome
+
+
+8. XỬ LÝ SỰ CỐ THƯỜNG GẶP
+-------------------------
+  • Bot không trả lời: kiểm tra Token/Chat ID, đã Start_Controller chưa,
+    xem Logs\controller.log
+  • /monitor ra N/A: thiếu Gemini API Key, hoặc PiCheck chưa mở
+  • Lỗi font tiếng Việt: dùng bản đã sửa UTF-8 (file .ps1 có BOM)
+  • /reset không đổi IP: cần chạy Controller / script với quyền Admin
+  • Muốn hiện lại menu + QR lần đầu: xóa file State\welcome_sent.flag
+    rồi restart Controller
+
+
+9. ỦNG HỘ TÁC GIẢ (TÙY TÂM)
+---------------------------
+  MB Bank (Ngân hàng Quân đội)
+  STK: 0905428801
+  Tên: TRAN HUU NGHI
+  Lệnh Telegram: /donate (có QR)
+
+  Cảm ơn anh chị đã dùng — mạnh tay ủng hộ, quán cà phê là vui!
+
+
+10. LIÊN KẾT NHANH
+------------------
+  BotFather (tạo bot):     https://t.me/BotFather
+  Google AI API Key:      https://aistudio.google.com/apikey
+
+================================================================================
+  Chúc Node ổn định và nhận nhiều bonus!
+================================================================================
+
+
+AI NGON NGU TU NHIEN (GEMINI)
+------------------------------
+Controller co the dung Google Gemini de hieu tin nhan Telegram khong theo lenh.
+Vi du: "May toi the nao roi?", "Tien hanh bao cao nhanh", "May ngay nay Pi Node toi on khong?", "Cho toi xem Docker", "Chup anh man hinh".
+Gemini duoc nap san Knowledge Base ve muc dich app, cai dat, cau truc file, chuc nang tung script, lenh, scheduler va xu ly su co.
+Cau hoi can du lieu thuc te se duoc chuyen thanh thao tac Controller; AI khong tu y chay PowerShell.
+Maintenance va Reset van yeu cau xac nhan de tranh thao tac nguy hiem.
+
