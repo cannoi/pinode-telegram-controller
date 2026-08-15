@@ -1,0 +1,141 @@
+title: Pi Node Telegram Controller PRO
+description: >
+  Trợ lý giám sát Pi Node qua Telegram trên SoloHost.
+  Theo dõi kết nối Node, lịch kiểm tra, cảnh báo và AI Gemini.
+output_file: .env
+
+fixed_values:
+  - name: UID
+    detect: uid
+  - name: GID
+    detect: gid
+  - name: APP_NAME
+    value: pinode-telegram-controller
+  - name: TZ
+    value: Asia/Ho_Chi_Minh
+  - name: DATA_DIR
+    value: /data
+  - name: LOG_DIR
+    value: /data/logs
+  - name: STATE_DIR
+    value: /data/state
+  - name: HISTORY_FILE
+    value: /data/node_history.json
+  - name: CHAT_HISTORY_FILE
+    value: /data/chat_history.json
+  - name: GEMINI_NATURAL_LANGUAGE
+    value: "true"
+  - name: MONITOR_SELF_NOTIFY
+    value: "false"
+
+fields:
+  - name: TELEGRAM_BOT_TOKEN
+    label: Telegram Bot Token
+    type: password
+    required: true
+    help: Tạo bot bằng @BotFather và dán Bot Token vào đây.
+
+  - name: TELEGRAM_CHAT_ID
+    label: Telegram Chat ID
+    type: text
+    required: true
+    help: ID user hoặc nhóm Telegram nhận cảnh báo.
+
+  - name: PI_NODE_HOST
+    label: Pi Node host
+    type: text
+    default: host.docker.internal
+    required: true
+    help: Host/IP mà container có thể dùng để kiểm tra Pi Node.
+
+  - name: PI_NODE_PORTS
+    label: Pi Node ports
+    type: text
+    default: "31401,31402,31403"
+    required: true
+    help: Các port Pi Node cần kiểm tra, cách nhau bằng dấu phẩy.
+
+  - name: AI_PROVIDER
+    label: Trợ lý AI
+    type: select
+    default: gemini
+    options:
+      - value: gemini
+        label: Google Gemini — Khuyến nghị
+      - value: none
+        label: Tắt AI
+
+  - name: GEMINI_API_KEY
+    label: Gemini API Key
+    type: password
+    required: false
+    visible_if:
+      field: AI_PROVIDER
+      in: [gemini]
+    help: API key Gemini dùng để trả lời câu hỏi tự nhiên.
+
+  - name: SCHEDULER_ENABLED
+    label: Tự động giám sát
+    type: select
+    default: "true"
+    options:
+      - value: "true"
+        label: Bật — khuyến nghị
+      - value: "false"
+        label: Tắt
+
+  - name: MONITOR_INTERVAL_MINUTES
+    label: Chu kỳ kiểm tra (phút)
+    type: number
+    default: 60
+    required: true
+
+  - name: PROBLEM_RESCAN_MINUTES
+    label: Kiểm tra lại khi có lỗi (phút)
+    type: number
+    default: 10
+    required: true
+
+  - name: DAILY_REPORT_HOURS
+    label: Giờ báo cáo
+    type: text
+    default: "7,18"
+    help: Ví dụ 7,18.
+
+  - name: RAM_ALERT
+    label: Cảnh báo RAM (%)
+    type: number
+    default: 88
+
+  - name: CPU_ALERT
+    label: Cảnh báo CPU (%)
+    type: number
+    default: 90
+
+  - name: TEMP_ALERT
+    label: Cảnh báo nhiệt độ (°C)
+    type: number
+    default: 78
+
+  - name: INCOMING_LOW
+    label: Incoming thấp
+    type: number
+    default: 3
+
+  - name: AUTO_RESET_ON_FAIL
+    label: Tự khắc phục
+    type: select
+    default: "false"
+    options:
+      - value: "false"
+        label: Tắt — an toàn
+      - value: "true"
+        label: Bật
+
+  - name: PROBLEM_STREAK_BEFORE_RESET
+    label: Số lần lỗi trước khi khắc phục
+    type: number
+    default: 3
+    visible_if:
+      field: AUTO_RESET_ON_FAIL
+      in: ["true"]
