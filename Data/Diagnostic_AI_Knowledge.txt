@@ -1,0 +1,88 @@
+PI NODE DIAGNOSTIC PRO - AI / CONTROLLER INTEGRATION
+
+LOCATION
+  Data/Pi_Node_Diagnostic_PRO.ps1
+  Data/diagnostic_latest.json (generated after diagnostic)
+
+ROLE
+  Diagnostic is a READ-ONLY evidence collector.
+  It checks host resources, Pi Node processes, Docker, containers, WSL,
+  ports, Internet and node_history.json. It does not repair anything.
+
+NATURAL LANGUAGE ROUTING
+  Route to DIAGNOSTIC when the user asks about:
+    - why the Node is not working / unstable
+    - what is wrong with the machine or Node
+    - diagnose / check health / inspect the whole system
+    - Docker + ports + RAM + Node health together
+    - "Máy tôi có vấn đề gì?"
+    - "Chẩn đoán máy tôi"
+    - "Kiểm tra toàn bộ Node"
+    - "Tại sao Node của tôi không ổn?"
+    - "Xem giúp tôi lỗi ở đâu"
+
+  Route to STATISTICS when the user asks for historical analysis of a
+  specific metric or a chosen period, e.g.:
+    - "Tuần này máy có nóng không?"
+    - "7 ngày qua RAM thế nào?"
+    - "Tháng này CPU cao không?"
+
+  Route to STATUS when the user asks about current state:
+    - "Máy tôi thế nào rồi?"
+    - "Node hiện tại ra sao?"
+
+  Route to REPORT when the user asks for a general historical report:
+    - "Báo cáo tuần này"
+    - "Mấy ngày nay Node ổn không?" (unless a specific metric is requested)
+
+  If a sentence contains both a diagnostic request and a specific metric,
+  prefer the more specific intent when appropriate. For example:
+    "Kiểm tra tại sao Node nóng tuần này" -> STATISTICS/TEMPERATURE first,
+    then optionally use DIAGNOSTIC for current system context.
+
+EXECUTION
+  1. Run Data/Pi_Node_Diagnostic_PRO.ps1 only when DIAGNOSTIC is selected.
+  2. Read Data/diagnostic_latest.json after execution.
+  3. Treat JSON values as factual evidence.
+  4. Never invent a missing metric or claim an action was performed.
+  5. Gemini should explain findings in simple Vietnamese:
+       current state -> evidence -> likely cause -> severity -> recommended next step.
+  6. If an issue is not proven by the diagnostic, say "chưa đủ dữ liệu" rather
+     than guessing.
+
+RESPONSE STYLE
+  Start with a short conclusion.
+  Then show the 2-5 most important findings.
+  Separate:
+    [OK] healthy evidence
+    [WARN] things to monitor
+    [ERROR] confirmed problems
+  Do not dump raw JSON unless the user asks for technical details.
+
+SAFETY
+  Diagnostic never restarts/stops/resets/deletes/prunes anything.
+  Maintenance/reset/repair remain separate actions and require their own
+  explicit routing/confirmation.
+
+=== KIẾN THỨC PI DESKTOP / PI NODE (CẬP NHẬT) ===
+
+CONTAINER pi-port-checker (PortsChecker):
+- Là công cụ kiểm tra cổng một lần của Pi Desktop.
+- Chạy xong rồi thoát (Exited / Exited 137) là HÀNH VI BÌNH THƯỜNG.
+- Không ảnh hưởng đến việc Node đang chạy nếu:
+    • Cổng 31401, 31402, 31403 đang mở, và
+    • Container chính (testnet2 / consensus / mainnet…) đang Running.
+- Khi gặp pi-port-checker Exited:
+    → Đưa vào nhóm thông tin bình thường hoặc [OK], KHÔNG xếp vào [WARN]/[ERROR].
+    → KHÔNG gợi ý khởi động lại Docker Desktop chỉ vì container này.
+    → Chỉ cảnh báo nếu cổng thực tế đang đóng hoặc container chính bị dừng.
+
+ĐÁNH GIÁ SỨC KHỎE NODE:
+- HEALTHY: container chính Running + cổng 31401-31403 mở + Internet OK.
+- HEALTHY_WITH_WARNINGS: có cảnh báo phụ (RAM/CPU/nhiệt độ, hoặc container phụ đã thoát) nhưng Node vẫn hoạt động ổn.
+- UNHEALTHY: container chính Exited/Restarting, cổng đóng, mất Internet hoặc đồng bộ lỗi nghiêm trọng.
+
+NGUYÊN TẮC TRẢ LỜI THÔNG MINH:
+- Ưu tiên bằng chứng thực tế (cổng mở + container chính chạy) hơn trạng thái của công cụ kiểm tra một lần.
+- Giữ ngữ cảnh giữa các câu hỏi (nhớ máy nào, lần chẩn đoán trước).
+- Trả lời ngắn gọn, thực tế, tránh lặp lại cảnh báo không cần thiết.

@@ -1,0 +1,31 @@
+PI DESKTOP / PI NODE - KIẾN THỨC CẬP NHẬT (2025-2026)
+
+1. CONTAINER pi-port-checker (PortsChecker)
+   - Là công cụ kiểm tra cổng một lần (one-shot) của Pi Desktop.
+   - Chạy ngắn rồi thoát (Exited) là HÀNH VI BÌNH THƯỜNG.
+   - Exit code 137 (SIGKILL) thường gặp, không phải lỗi nghiêm trọng.
+   - Trạng thái "Exited", "unknown", "absent" của PortsChecker KHÔNG ảnh hưởng đến Node đang chạy.
+   - Chỉ cần quan tâm khi:
+        • Các cổng 31401 / 31402 / 31403 thực sự đóng, HOẶC
+        • Container chính (testnet2, consensus, mainnet…) bị Exited / Restarting liên tục.
+   - Khi diagnostic báo pi-port-checker Exited nhưng cổng đang mở → coi là [OK] hoặc chỉ ghi nhận thông tin, KHÔNG đưa vào WARN/ERROR, KHÔNG gợi ý restart Docker chỉ vì container này.
+
+2. CÁC CONTAINER QUAN TRỌNG CẦN THEO DÕI
+   - Container chính của Node (thường tên testnet2, consensus, pi-node, mainnet…).
+   - Phải ở trạng thái Running khi Node đang bật.
+   - Nếu container chính Exited/Restarting → đây mới là vấn đề cần xử lý.
+
+3. CỔNG PI NODE
+   - 31401, 31402, 31403 là cổng quan trọng.
+   - Kiểm tra thực tế bằng Test-NetConnection hoặc trang ngoài (pi-mods.de/nodeports).
+   - Nếu cổng mở + container chính Running → Node được coi là hoạt động bình thường về mặt kết nối.
+
+4. NGUYÊN TẮC ĐÁNH GIÁ SỨC KHỎE
+   - HEALTHY: container chính Running + cổng 31401-31403 mở + Internet OK.
+   - HEALTHY_WITH_WARNINGS: có cảnh báo phụ (nhiệt độ, RAM cao, hoặc container phụ như pi-port-checker Exited) nhưng Node vẫn chạy ổn.
+   - UNHEALTHY: container chính dừng, cổng đóng, hoặc mất kết nối Internet/đồng bộ.
+
+5. GỢI Ý TRẢ LỜI KHI GẶP pi-port-checker Exited
+   - Kết luận ngắn: Node vẫn ổn, container kiểm tra cổng đã hoàn thành nhiệm vụ và thoát là bình thường.
+   - Không khuyến nghị restart Docker / Docker Desktop chỉ vì pi-port-checker.
+   - Chỉ gợi ý kiểm tra thêm nếu người dùng báo Node không đồng bộ hoặc cổng thực tế đóng.

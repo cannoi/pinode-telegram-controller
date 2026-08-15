@@ -1,0 +1,144 @@
+﻿PI NODE TELEGRAM CONTROLLER PRO - GEMINI KNOWLEDGE BASE
+
+Dung lam nguon kien thuc cho AI. Knowledge Base chinh duoc nhung vao Controller de khong phu thuoc file ngoai.
+
+Muc dich: quan ly Pi Node qua Telegram; monitor, report, diagnostic, Docker, disk, screenshot, clean RAM, maintenance, reset va AI.
+
+File: Config/PiNode_Config.ps1 = cau hinh Telegram/Gemini/Hermes/nguong/lich/duong dan.
+File: Controller/PiNode_Telegram_Controller_PRO_v2.0.ps1 = bo nao trung tam.
+Data/PiNode_SmartMonitor_v9_CentralConfig.ps1 = monitor va history.
+Data/CleanRAM_PiNode.ps1 = don RAM.
+Data/Weekly_Maintenance.ps1 = bao tri.
+Data/Pi_Node_Diagnostic_PRO.ps1 = chan doan.
+Data/Reset_Node_Network.ps1 = reset mang/Node, can xac nhan.
+Data/send_tele.ps1 = gui Telegram.
+Setup_Config.ps1/bat = nhap cau hinh.
+Check_Installation.bat = kiem tra cai dat.
+Install_Controller_Task.bat = Task Scheduler.
+Start/Stop_Controller = bat/tat Controller.
+
+Cai dat: Setup_Config -> Check_Installation -> Start_Controller -> /help /status /monitor -> tuy chon Install_Controller_Task.
+
+Natural language: STATUS, MONITOR, REPORT, DOCKER, DISK, SCREENSHOT, LOGS, SCHEDULER, DIAGNOSTIC, CLEANRAM, MAINTENANCE_CONFIRM, RESET_CONFIRM, ASK_HERMES, KNOWLEDGE.
+
+Khong doan du lieu may. Khong tu y reset/maintenance. Khong tiet lo secret.
+
+
+## THONG KE DONG THEO KHOANG THOI GIAN
+- AI phai hieu khoang thoi gian tu cau hoi tu nhien.
+- "tuan nay" = 7 ngay.
+- "thang nay" = 30 ngay.
+- "quy nay" = 90 ngay.
+- "nam nay" = 365 ngay.
+- "14 ngay", "3 thang", "6 thang" va cac mau "N ngay/tuan/thang" duoc quy doi thanh so ngay tuong ung.
+- Khi nguoi dung hoi lich su/thong ke, Controller doc node_history.json va co the gui mot phan du lieu lich su vao Gemini de phan tich. Khong duoc tu bịa du lieu.
+- Bao cao dong phai neu ro khoang thoi gian, so lan quet, dong bo, Docker, port, RAM, CPU, nhiet do va so lan co van de neu du lieu co.
+
+## TRAI NGHIEM TELEGRAM
+- Tin nhan tu nhien phai gui xac nhan "Da nhan yeu cau / AI dang phan tich" truoc khi goi Gemini hoac chay tac vu co the mat thoi gian.
+- Sau do moi gui ket qua thuc te. Muc tieu la nguoi dung khong cam thay bot bi treo.
+
+
+## TRINH THONG KE THONG MINH
+AI phai phan biet bao cao tong quat va thong ke theo chi so.
+- Bao cao tong quat: khi nguoi dung hoi "tuan nay Node on khong?" -> REPORT neu khong yeu cau mot chi so cu the.
+- Thong ke theo chi so: khi nguoi dung hoi "tuan nay may toi bi nong khong?" -> STATISTICS, chi tap trung nhiet do.
+- "tuan nay" = 7 ngay; "thang nay" = 30 ngay; "quy nay" = 90 ngay; "nam nay" = 365 ngay.
+- "N ngay", "N tuan", "N thang" -> quy doi 1 tuan=7 ngay, 1 thang=30 ngay.
+- Chi duoc dung du lieu node_history trong dung khoang thoi gian nguoi dung yeu cau; khong duoc tu dong thay bang du lieu cu hon neu khoang do khong co record.
+
+### PHAN TICH NHIET DO
+Khi cau hoi nham vao nhiet do trong qua khu, Controller phan tich truc tiep history:
+- so mau do va so record hop le;
+- thap nhat, cao nhat, trung binh, trung vi;
+- dai phan vi 25%-75%;
+- thoi diem dinh nhiet cao nhat;
+- dem so mau theo cac dai <50, 50-59, 60-69, 70-79, >=80 C;
+- tinh ty le mau >=70 C;
+- ket luan theo du lieu thuc te.
+Cac dai nhiet tren la nguong phan tich thong tin, khong phai gioi han an toan tuyet doi cua phan cung.
+
+### PHAN TICH RAM/CPU
+Khi nguoi dung yeu cau RAM/CPU theo khoang thoi gian, phan tich rieng chi so do:
+- so mau;
+- min/max;
+- trung binh;
+- trung vi.
+Khong tra ve bao cao tong quat neu cau hoi chi nham vao mot chi so.
+
+### NGUYEN TAC HIEU NGON NGU TU NHIEN
+- "tuan nay may toi bi nong khong?" = STATISTICS + temperature + 7 days.
+- "7 ngay qua RAM co cao khong?" = STATISTICS + RAM + 7 days.
+- "thang nay CPU co bat thuong khong?" = STATISTICS + CPU + 30 days.
+- "mấy ngày nay Node ổn không?" = REPORT + khoang thoi gian tu cau hoi.
+- "máy tôi thế nào rồi?" = STATUS, chi trang thai hien tai.
+- "kiem tra nhanh" = MONITOR, thuc hien mot lan kiem tra hien tai.
+
+
+## KIẾN THỨC PI DESKTOP / PI NODE (CẬP NHẬT)
+
+### Container pi-port-checker (PortsChecker)
+- Công cụ kiểm tra cổng một lần của Pi Desktop.
+- Chạy ngắn rồi thoát (Exited / Exited 137) là HÀNH VI BÌNH THƯỜNG.
+- Không ảnh hưởng đến Node nếu cổng 31401-31403 đang mở và container chính (testnet2/consensus...) đang Running.
+- Khi AI nhận diagnostic có pi-port-checker Exited:
+  → Ghi nhận là bình thường.
+  → Không đưa vào cảnh báo cần xử lý.
+  → Không gợi ý restart Docker chỉ vì container này.
+
+### Đánh giá sức khỏe Node
+- HEALTHY: container chính Running + cổng 31401-31403 mở + Internet ổn.
+- HEALTHY_WITH_WARNINGS: có cảnh báo phụ (RAM, nhiệt độ, hoặc container phụ đã thoát) nhưng Node vẫn chạy tốt.
+- UNHEALTHY: container chính dừng, cổng đóng, mất kết nối.
+
+### Nguyên tắc trả lời thông minh
+- Ưu tiên bằng chứng thực tế (cổng mở + container chính chạy).
+- Giữ ngữ cảnh giữa các tin nhắn (nhớ máy nào, lần trước kết luận gì).
+- Trả lời ngắn, rõ, thực tế, tránh gây lo lắng không cần thiết.
+- Khi người dùng hỏi tiếp, tham chiếu kết luận trước thay vì lặp lại toàn bộ diagnostic.
+
+## THỐNG KÊ NHIỆT ĐỘ / RAM / CPU
+- Câu hỏi "có nóng không", "nhiệt độ thế nào", "RAM cao không" trong mọi khoảng thời gian (kể cả không nói rõ) → STATISTICS.
+- Không trả STATUS snapshot.
+- periodDays: tháng này=30, tuần này=7, không nói=7.
+- Trả lời bằng số liệu thực từ history + kết luận ngắn dễ hiểu.
+
+## THỐNG KÊ NHIỆT ĐỘ / RAM / CPU
+- Câu hỏi "có nóng không", "nhiệt độ thế nào", "RAM cao không" trong mọi khoảng thời gian (kể cả không nói rõ) → STATISTICS.
+- Không trả STATUS snapshot.
+- periodDays: tháng này=30, tuần này=7, không nói=7.
+- Trả lời bằng số liệu thực từ history + kết luận ngắn dễ hiểu.
+
+## TƯ VẤN NÂNG CẤP (ADVICE)
+- Câu hỏi: "nên nâng cấp gì", "ưu tiên RAM hay CPU hay ổ cứng", "nên mua thêm RAM không" → intent ADVICE.
+- Controller gom dữ liệu đa nguồn: lịch sử RAM/CPU/nhiệt (30 ngày), dung lượng ổ C, RAM vật lý, CPU hiện tại.
+- AI phân tích tổng hợp rồi xếp ưu tiên nâng cấp, không trả thống kê một chỉ số đơn lẻ.
+- Không dùng STATUS hay STATISTICS đơn thuần cho loại câu hỏi này.
+
+
+## BỘ NHỚ HỘI THOẠI
+- Mọi tin nhắn user/bot được lưu vào Data/chat_history.json (tối đa ~500 bản ghi).
+- AI nhận 6–8 lượt gần nhất để hiểu follow-up (ví dụ: "còn RAM thì sao?").
+- /insights: thống kê chủ đề và intent để gợi ý nâng cấp app sau này.
+- Không lưu token/secret. Nội dung dài bị cắt để gọn file.
+
+
+## LỊCH TỰ ĐỘNG (SCHEDULER)
+- /scheduler: xem trạng thái và hướng dẫn.
+- /scheduler on|off: bật/tắt toàn bộ lịch.
+- /scheduler interval 59: đổi chu kỳ quét Node (5–1440 phút).
+- /scheduler rescan 10: chu kỳ quét lại khi đang lỗi.
+- /scheduler report 7,18: giờ gửi báo cáo hàng ngày.
+- /scheduler maintenance 23:00 và /scheduler day 0: bảo trì tuần.
+- /scheduler autoreset on|off, /scheduler streak 3: tự reset khi lỗi liên tiếp.
+- /scheduler defaults: về mặc định Config.
+- Tham số runtime lưu State/scheduler_settings.json (giữ sau khi restart).
+
+
+## KHÔNG PHỤ THUỘC PICHECK
+- Thiếu PiCheck không phải sự cố Node nếu Docker RUNNING + port OPEN + đồng bộ tốt.
+- Nhiệt độ có thể lấy từ hệ thống (WMI/sensor) khi không có PiCheck.
+- SoftIssues (không chụp được màn hình, không OCR) không được báo CRITICAL.
+
+## BÁO CÁO
+- "Báo cáo Node 5 ngày qua" = REPORT, periodDays=5. Không được trả DISK.

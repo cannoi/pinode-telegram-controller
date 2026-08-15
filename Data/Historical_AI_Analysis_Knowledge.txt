@@ -1,0 +1,46 @@
+﻿HISTORICAL AI ANALYSIS
+
+Historical questions are evidence-analysis requests, not STATUS requests.
+
+Examples:
+- "30 ngày qua máy tôi có sự cố gì không?" -> REPORT + Gemini historical analysis
+- "Mấy ngày nay Pi Node ổn không?" -> REPORT + Gemini historical analysis
+- "Tuần này máy có nóng không?" -> STATISTICS + Gemini historical analysis
+- "7 ngày qua RAM thế nào?" -> STATISTICS + Gemini historical analysis
+
+For broad historical questions, the Controller sends:
+- record count
+- actual time range
+- problems count
+- abnormal sync/Docker/port counts
+- temperature/RAM/CPU min/max/average/median
+- incident samples
+- abnormal resource samples
+- recent history samples
+
+Gemini must reason over the period, not answer from the latest status.
+If Gemini is unavailable, the controller falls back to deterministic statistics.
+
+=== BỔ SUNG VỀ CONTAINER & NGỮ CẢNH ===
+- Khi phân tích lịch sử, nếu thấy pi-port-checker Exited nhiều lần → đây là bình thường, không tính là sự cố.
+- AI nên nhớ ngữ cảnh máy (tên máy, lần chẩn đoán trước) để trả lời liền mạch.
+- Ưu tiên xu hướng thực sự quan trọng (nhiệt độ tăng, RAM cao kéo dài, cổng đóng, container chính dừng) thay vì các container one-shot.
+
+=== THỐNG KÊ ĐỘNG THÔNG MINH ===
+- "Tháng này máy có nóng không?" / "30 ngày vừa qua máy có nóng không?" / "Máy tôi chạy có nóng không?"
+  → STATISTICS + nhiệt độ (mặc định 7 ngày nếu không nêu khoảng thời gian; tháng này = 30 ngày).
+- Không được trả STATUS hiện tại cho các câu hỏi trên.
+- Ưu tiên số liệu từ node_history: min / max / trung bình / trung vị / đỉnh / phân bố dải nhiệt.
+- Kết luận phải dựa trên cả khoảng thời gian, không chỉ bản ghi mới nhất.
+
+=== THỐNG KÊ ĐỘNG THÔNG MINH ===
+- "Tháng này máy có nóng không?" / "30 ngày vừa qua máy có nóng không?" / "Máy tôi chạy có nóng không?"
+  → STATISTICS + nhiệt độ (mặc định 7 ngày nếu không nêu khoảng thời gian; tháng này = 30 ngày).
+- Không được trả STATUS hiện tại cho các câu hỏi trên.
+- Ưu tiên số liệu từ node_history: min / max / trung bình / trung vị / đỉnh / phân bố dải nhiệt.
+- Kết luận phải dựa trên cả khoảng thời gian, không chỉ bản ghi mới nhất.
+
+=== TƯ VẤN NÂNG CẤP ĐA NGUỒN ===
+- Câu hỏi nâng cấp phần cứng cần kết hợp: RAM history + CPU history + nhiệt + ổ đĩa + cấu hình hiện tại.
+- Intent: ADVICE.
+- Không trả về chỉ một bảng thống kê RAM khi người dùng hỏi so sánh nhiều thành phần.
