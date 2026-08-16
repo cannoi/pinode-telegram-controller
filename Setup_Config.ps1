@@ -17,7 +17,6 @@ $Host.UI.RawUI.WindowTitle = 'Nhap Key - Pi Node Controller'
 
 $AppRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Cfg = Join-Path $AppRoot 'Config\PiNode_Config.ps1'
-$TemplateCfg = Join-Path $AppRoot 'Config\PiNode_Config.template.ps1'
 
 
 # ============================================================
@@ -137,14 +136,12 @@ Write-Host ''
 # ============================================================
 
 if (-not (Test-Path -LiteralPath $Cfg)) {
-    if (Test-Path -LiteralPath $TemplateCfg) {
-        Copy-Item -LiteralPath $TemplateCfg -Destination $Cfg -Force
-        Write-Host '[OK] Da tao Config\\PiNode_Config.ps1 tu template.' -ForegroundColor Green
-    } else {
-        Write-Host '[LOI] Khong tim thay Config\\PiNode_Config.ps1 va template.' -ForegroundColor Red
-        Read-Host 'Nhan Enter de thoat'
-        exit 1
-    }
+
+    Write-Host '[LOI] Khong tim thay Config\PiNode_Config.ps1' -ForegroundColor Red
+
+    Read-Host 'Nhan Enter de thoat'
+
+    exit 1
 }
 
 

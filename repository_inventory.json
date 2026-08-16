@@ -1,0 +1,187 @@
+{
+  "repository": "cannoi/pinode-telegram-controller",
+  "download_url": "https://github.com/cannoi/pinode-telegram-controller/archive/refs/heads/main.zip",
+  "preservation_policy": "MASTER_RELEASE_POLICY.md",
+  "files": [
+    {
+      "path": "Check_Installation.bat",
+      "size_bytes": 758,
+      "sha256": "1c26cb11c3ec1c4806e6a304a734754ae275a9aa8febda702d46332c22cd2c68"
+    },
+    {
+      "path": "Commands/commands.json",
+      "size_bytes": 733,
+      "sha256": "838d96b3f531a9db8eea7c012a17a7f323cd269a944b80939b56541033456e28"
+    },
+    {
+      "path": "Config/PiNode_Config.ps1",
+      "size_bytes": 2883,
+      "sha256": "909b91ced5f024e4c61cd963c9b110ad9c29f7e41c5f8c227c252aa8cd8a5d42"
+    },
+    {
+      "path": "Controller/PiNode_Telegram_Controller_PRO_v2.0.ps1",
+      "size_bytes": 130384,
+      "sha256": "145984892be7e93f2170c540f77723ce72742f8ceee4ce51cf485bbb152ca33a"
+    },
+    {
+      "path": "Data/CleanRAM_PiNode.ps1",
+      "size_bytes": 2140,
+      "sha256": "43ed563406802620e58fbcba114bc852de6377b6d0d07671b41b017b31d3ff11"
+    },
+    {
+      "path": "Data/Diagnostic.ps1",
+      "size_bytes": 1423,
+      "sha256": "3b96559250e40a2ebdf08e81b80a33a242a7bf6cd4c13799c052d23671a02dc5"
+    },
+    {
+      "path": "Data/Diagnostic_AI_Knowledge.txt",
+      "size_bytes": 4089,
+      "sha256": "43c26fa5a815d4db14949ca4e648b13c7526abd961a09631ed94953d4db47149"
+    },
+    {
+      "path": "Data/Diagnostic_AI_Response_Knowledge.txt",
+      "size_bytes": 2985,
+      "sha256": "6cffbd58f44f842423673c6405ca1597b32281f0eefc17fcf550fe334281d439"
+    },
+    {
+      "path": "Data/Diagnostic_Integration_README.txt",
+      "size_bytes": 489,
+      "sha256": "3ad2a3bb13ea672471ecf519a803c88f2fe6af24bf2364e5cb772b366bc570f2"
+    },
+    {
+      "path": "Data/Diagnostic_Module.json",
+      "size_bytes": 319,
+      "sha256": "b05dd0238fa02313d20479abdd143ab215558fc39cc1e67ba1fc8caa51175da8"
+    },
+    {
+      "path": "Data/Gemini_Knowledge_Base.txt",
+      "size_bytes": 8441,
+      "sha256": "1de54729a6262052a6def8badfc622837864db0a52c56e5af8787afe78b95302"
+    },
+    {
+      "path": "Data/Historical_AI_Analysis_Knowledge.txt",
+      "size_bytes": 3118,
+      "sha256": "85946122cd08d8f57223ccb4700475183d91a986fb86c50894b4f71306402db1"
+    },
+    {
+      "path": "Data/PiNode_SmartMonitor_v9_CentralConfig.ps1",
+      "size_bytes": 29036,
+      "sha256": "98709b9048e7c2ac0ce899e44645499cd3bc22d0d68bf9e13a63b3f89198b280"
+    },
+    {
+      "path": "Data/Pi_Desktop_Node_Knowledge.txt",
+      "size_bytes": 2253,
+      "sha256": "d48a2ac05f815500059c74a88bc2b198ab25a34bde600b38b370e4a60746f3b7"
+    },
+    {
+      "path": "Data/Pi_Node_Diagnostic_PRO.ps1",
+      "size_bytes": 16041,
+      "sha256": "596a9bcadc238c3c867bb395d797f2522b1cfd68133d957885499f582360753e"
+    },
+    {
+      "path": "Data/Reset_Node_Network.ps1",
+      "size_bytes": 8664,
+      "sha256": "0c9b0f0e8781118ce77000c4a0ba4052090cfa4b6b3f79a3cd6dbce28be7980a"
+    },
+    {
+      "path": "Data/Run_Diagnostic_For_AI.ps1",
+      "size_bytes": 469,
+      "sha256": "378d623aa07e21ba1dba423ccaedee767402171a0806d548a72a54eb14bb2014"
+    },
+    {
+      "path": "Data/Test_Diagnostic_Pipeline.ps1",
+      "size_bytes": 708,
+      "sha256": "1d8e4c8b9f46ec8c5215ac69c5ef9bd19aa2f62bc7dba21054765dac76be52d4"
+    },
+    {
+      "path": "Data/Weekly_Maintenance.ps1",
+      "size_bytes": 4574,
+      "sha256": "43ae0b26385072e096a3090b58998c412a84e9624c9a6f246e6fea49621001a6"
+    },
+    {
+      "path": "Data/chat_history.json",
+      "size_bytes": 3,
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "path": "Data/send_tele.ps1",
+      "size_bytes": 1413,
+      "sha256": "eafb6266d3baaec19e69848c39f775ffea9238efe07de0a5b5fbef6bef2429fd"
+    },
+    {
+      "path": "HUONG_DAN_SU_DUNG.txt",
+      "size_bytes": 7526,
+      "sha256": "13d80bc304c7c3ebc6e989d736c19ad82d1ecfb75beb3bd2c2f3bc698ff88fbe"
+    },
+    {
+      "path": "Install_Controller_Task.bat",
+      "size_bytes": 946,
+      "sha256": "096681d4e761db80e9d32cfeff705127dc8270bc9f779e44d5a72c48f31f8aa4"
+    },
+    {
+      "path": "MASTER_RELEASE_POLICY.md",
+      "size_bytes": 1523,
+      "sha256": "9b36024f1c73468ccc482ac04d82214b4bf97c0c848a76ecb795d2c8bbefd4b3"
+    },
+    {
+      "path": "Modules/Alert/README.txt",
+      "size_bytes": 95,
+      "sha256": "0702601e2a94b171a53ee952e21239dec1a246fb3cf97482609e933b5628edc1"
+    },
+    {
+      "path": "Modules/Maintenance/README.txt",
+      "size_bytes": 117,
+      "sha256": "d1c850562f5622afd180f64126f120b5732ed80485985bc97fcfce2fdfa1597e"
+    },
+    {
+      "path": "Modules/Monitor/README.txt",
+      "size_bytes": 131,
+      "sha256": "46c29c1fab768922f56730bc679f1ad72938ec6621b16a12037b5b1beff8da56"
+    },
+    {
+      "path": "Modules/Scheduler/README.txt",
+      "size_bytes": 110,
+      "sha256": "ffb8c6447756c3f27984f38705ce1550e12717420def683d145cdd77bfd88c1f"
+    },
+    {
+      "path": "README.md",
+      "size_bytes": 3088,
+      "sha256": "da87d446793bad32c55a421fd16a8be2f48636e0bab4f2457c156129aaa928c3"
+    },
+    {
+      "path": "README.txt",
+      "size_bytes": 2476,
+      "sha256": "8d495cb98f54d3b309a14b4d97fbb50b4886f72c584a7f8246b36bf02642180b"
+    },
+    {
+      "path": "Setup_Config.bat",
+      "size_bytes": 183,
+      "sha256": "49cdd3e12c7fb81d96fbb60692ed99fe1ee61ff3ca97e38ceab95d0ee48ab9b4"
+    },
+    {
+      "path": "Setup_Config.ps1",
+      "size_bytes": 7473,
+      "sha256": "9cdbfc0417e9019341afa203a97cf150cb4dca4dbda2aefc83fa909c76ef694f"
+    },
+    {
+      "path": "Start_Controller.bat",
+      "size_bytes": 1426,
+      "sha256": "8160fdd3b860dc62fd016fa62fc4bc4f88ce8c2ed76ca95de8f4cba8541f02eb"
+    },
+    {
+      "path": "Start_Controller.exe",
+      "size_bytes": 471084,
+      "sha256": "9e4bd41211a28429d57b9daafbc922c32e3be029915165fa1dcf4c321ec266a8"
+    },
+    {
+      "path": "Start_Controller_Hidden.bat",
+      "size_bytes": 194,
+      "sha256": "0a89e32e744b05102561a9861920421c9fa5c72eeadb15b0c12ed17e58c3b5b4"
+    },
+    {
+      "path": "Stop_Controller.bat",
+      "size_bytes": 585,
+      "sha256": "35e2aa6218c4e0c0f2e19c686ba67bf049943a6307ce41d7bffbf9bf08023198"
+    }
+  ]
+}

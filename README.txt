@@ -37,3 +37,14 @@ V2.4 SMART STATISTICS:
 
 ## Diagnostic PRO Integration
 The main Controller now includes `Pi_Node_Diagnostic_PRO.ps1`. Natural-language diagnostic requests can invoke it, and Gemini can analyze `diagnostic_latest.json`. The diagnostic is read-only.
+
+
+---
+v2.9 SMART OPS (dựa trên v2.8 SMART_ROBUST)
+- Giữ nguyên toàn bộ lệnh & pipeline monitor/diagnostic/reset/scheduler
+- Thêm /settings: phong cách simple | balanced | numeric theo từng khách
+- Status / Report / AI phân tích: nhận định vận hành + gợi ý, không chỉ số thô
+- Scheduler menu giải thích rõ interval / rescan / autoreset / streak
+- Không giảm sức mạnh; tối ưu thành nhân viên vận hành Node 24/7
+
+Khoi dong khuyen nghi: Start_Controller.exe (double-click)

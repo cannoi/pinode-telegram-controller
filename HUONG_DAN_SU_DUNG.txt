@@ -147,3 +147,31 @@ Gemini duoc nap san Knowledge Base ve muc dich app, cai dat, cau truc file, chuc
 Cau hoi can du lieu thuc te se duoc chuyen thanh thao tac Controller; AI khong tu y chay PowerShell.
 Maintenance va Reset van yeu cau xac nhan de tranh thao tac nguy hiem.
 
+
+
+========================================
+CÀI ĐẶT PHONG CÁCH TRẢ LỜI (mới)
+========================================
+/settings
+  Xem menu cài đặt + giải thích từng lựa chọn
+
+/settings style simple
+  Trả lời dễ hiểu, ít số thô — tình trạng → ý nghĩa → việc nên làm
+
+/settings style balanced
+  Mặc định: số liệu then chốt + nhận định + gợi ý
+
+/settings style numeric
+  Ưu tiên min/max/trung bình, severity, mẫu đo
+
+/settings tips on|off
+  Bật/tắt dòng gợi ý hữu ích
+
+/settings reset
+  Về mặc định
+
+/scheduler
+  Lịch quét, báo cáo, tự reset — có giải thích từng tham số trong menu
+
+Lưu ý: Thiếu PiCheck không còn bị báo sự cố giả nếu Docker + cổng + sync vẫn tốt.
+Nhiệt độ có fallback sensor hệ thống khi không đọc được từ PiCheck.

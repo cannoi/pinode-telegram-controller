@@ -1,68 +1,83 @@
-# Pi Node Telegram Controller PRO — Windows Edition
+# Pi Node Telegram Controller PRO
 
-Trợ lý giám sát và vận hành Pi Node trên Windows qua Telegram.
+Trợ lý vận hành **Pi Node** 24/7 qua Telegram trên Windows.
 
-## Có gì trong bản này?
+Giám sát đồng bộ, cổng, Docker, RAM/CPU/nhiệt độ — cảnh báo sự cố thật, báo cáo định kỳ, điều khiển từ xa bằng lệnh hoặc tiếng Việt tự nhiên.
 
-- Telegram `/status`, `/monitor`, `/report`, `/diagnostic`
-- `/docker`, `/disk`, `/logs`, `/screenshot`
-- `/cleanram`
-- `/maintenance` + `/confirm` + `/cancel`
-- `/reset` + `/confirmreset` + `/cancel`
-- `/scheduler`
-- `/ask` với Hermes
-- Natural Language với Gemini
-- Lịch sử Node và lịch sử hội thoại
-- Smart Monitor + cảnh báo theo ngưỡng
-- Diagnostic PRO
-- Screenshot/OCR PiCheck
-- Windows Task Scheduler auto-start
-- Các script PowerShell bảo trì, mạng và Docker
+## Tính năng chính
+
+- Smart Monitor: đọc PiCheck / Pi Desktop + fallback sensor hệ thống
+- Phân mức sự cố: Soft / Warning / Critical (không báo giả khi thiếu PiCheck)
+- Lịch tự động chỉnh trên Telegram (`/scheduler`)
+- Phong cách trả lời theo người dùng (`/settings`: simple | balanced | numeric)
+- AI (Gemini): phân tích lịch sử, tư vấn nâng cấp, chẩn đoán
+- Lệnh: `/status` `/monitor` `/report` `/diagnostic` `/reset` `/cleanram` `/maintenance` `/docker` `/disk` `/logs` `/screenshot` `/ask` …
+
+## Yêu cầu
+
+- Windows 10/11
+- PowerShell 5.1+
+- Docker Desktop (cho Pi Node)
+- Telegram Bot Token + Chat ID
+- (Tuỳ chọn) Gemini API Key — [Google AI Studio](https://aistudio.google.com/apikey)
+
+## Cài đặt nhanh
+
+1. Clone repo hoặc tải ZIP:
+   ```bash
+   git clone https://github.com/cannoi/pinode-telegram-controller.git
+   ```
+2. Chạy `Setup_Config.bat` **hoặc** sửa `Config/PiNode_Config.ps1`:
+   - `BotToken` — token từ @BotFather
+   - `ChatId` — ID chat/nhóm
+   - `GeminiApiKey` — nếu dùng AI
+3. `Start_Controller.bat` (cửa sổ hiện) hoặc `Start_Controller_Hidden.bat`
+4. Trên Telegram: `/help` → `/monitor` → `/settings`
+
+## Lệnh cài đặt phong cách
+
+| Lệnh | Mô tả |
+|------|--------|
+| `/settings` | Menu + giải thích |
+| `/settings style simple` | Dễ hiểu, ít số thô |
+| `/settings style balanced` | Cân bằng (mặc định) |
+| `/settings style numeric` | Ưu tiên số liệu |
+| `/scheduler` | Lịch quét, báo cáo, tự reset |
+
+Chi tiết: xem `HUONG_DAN_SU_DUNG.txt`.
+
+## Cấu trúc thư mục
+
+```
+Config/          # PiNode_Config.ps1 — token & ngưỡng
+Controller/      # Bot chính (PowerShell)
+Data/            # Monitor, diagnostic, knowledge, scripts
+Commands/        # commands.json
+Modules/         # Ghi chú module
+*.bat            # Start / Stop / Setup / Task
+```
 
 ## Bảo mật
 
-**Không commit Bot Token, Chat ID hoặc Gemini API Key.**
+- **Không** commit token/API key thật.
+- File `Config/PiNode_Config.ps1` trong repo chỉ chứa placeholder.
+- Runtime tạo `State/`, `Logs/`, history JSON — đã có trong `.gitignore`.
 
-Bản GitHub chỉ chứa cấu hình mẫu. Sau khi tải source về Windows:
+## SoloHost / Docker
 
-1. Chạy `Setup_Config.bat` hoặc `Setup_Config.ps1`.
-2. Nhập Telegram Bot Token, Chat ID và Gemini API Key.
-3. Chạy `Start_Controller.bat` bằng quyền Administrator lần đầu nếu cần.
-4. Gửi `/status` và `/monitor` trong Telegram.
-
-`Config/PiNode_Config.ps1` được `.gitignore` để tránh đẩy credential lên GitHub.
-
-## Kiến trúc
-
-```text
-Telegram
-   ↓
-Controller/PiNode_Telegram_Controller_PRO_v2.0.ps1
-   ├── Smart Monitor
-   ├── Diagnostic PRO
-   ├── Gemini
-   ├── Hermes
-   ├── Docker
-   ├── Windows metrics
-   └── Maintenance / Recovery
-```
-
-## Lưu ý quyền
-
-Các thao tác thay đổi hệ thống như reset mạng, firewall, Docker/WSL, maintenance cần quyền Administrator và/hoặc xác nhận Telegram.
-
-Không cho Gemini tự chạy PowerShell tùy ý. AI chỉ định tuyến vào các route đã đăng ký trong Controller.
-
-## GitHub
-
-Repository nên giữ nguyên cấu trúc thư mục của project nhưng **không commit**:
-- `Config/PiNode_Config.ps1`
-- Logs
-- State
-- history runtime
-- cache/temporary files
-- `__pycache__` / `.pyc` nếu có
+Bản này chạy **native Windows PowerShell** (OCR cửa sổ Pi Desktop, Task Scheduler).  
+Package SoloHost cần image Linux riêng và registry công khai — xem nhánh/docs SoloHost nếu có.
 
 ## Phiên bản
 
-Windows Edition dựa trên bộ chức năng `v2.8 SMART ROBUST` được đóng gói lại theo hướng GitHub-safe.
+**v2.9 SMART_OPS** — dựa trên v2.8 SMART_ROBUST:
+
+- Giữ đủ pipeline monitor / diagnostic / reset / scheduler
+- Thêm `/settings` và nhận định vận hành theo phong cách khách
+- Severity thông minh, nhiệt độ fallback, ít báo động giả
+
+## Hỗ trợ
+
+Issues: https://github.com/cannoi/pinode-telegram-controller/issues
+
+Ủng hộ phát triển: xem lệnh `/donate` trên bot.
