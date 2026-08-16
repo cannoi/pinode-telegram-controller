@@ -277,6 +277,115 @@ function Get-ChatHistoryInsights {
     } | ConvertTo-Json -Depth 5 -Compress
 }
 
+
+# ===== USER PREFERENCES (phong cách trả lời theo từng khách) =====
+$USER_PREFS_FILE = Join-Path $StateDir 'user_preferences.json'
+
+function Get-DefaultUserPreferences {
+    return [ordered]@{
+        style = 'balanced'   # simple | balanced | numeric
+        language = 'vi'
+        showTips = $true
+        verboseNumbers = $false
+        updatedAt = (Get-Date).ToString('o')
+    }
+}
+
+function Read-UserPreferences {
+    $d = Get-DefaultUserPreferences
+    if (!(Test-Path -LiteralPath $USER_PREFS_FILE)) { return $d }
+    try {
+        $raw = Get-Content -LiteralPath $USER_PREFS_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($k in @('style','language','showTips','verboseNumbers')) {
+            if ($null -ne $raw.PSObject.Properties[$k]) { $d[$k] = $raw.$k }
+        }
+        $d.style = ([string]$d.style).ToLowerInvariant()
+        if ($d.style -notin @('simple','balanced','numeric')) { $d.style = 'balanced' }
+        $d.showTips = [bool]$d.showTips
+        $d.verboseNumbers = [bool]$d.verboseNumbers
+        return $d
+    } catch { return (Get-DefaultUserPreferences) }
+}
+
+function Save-UserPreferences($prefs) {
+    try {
+        $prefs.updatedAt = (Get-Date).ToString('o')
+        ($prefs | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $USER_PREFS_FILE -Encoding UTF8
+        return $true
+    } catch { Write-Log "Save user prefs loi: $($_.Exception.Message)"; return $false }
+}
+
+function Get-StyleInstruction {
+    $p = Read-UserPreferences
+    switch ($p.style) {
+        'simple' {
+            return @"
+PHONG CÁCH TRẢ LỜI (SIMPLE — khách thích dễ hiểu):
+- Nói như kỹ thuật viên tận tâm giải thích cho người không chuyên.
+- Tránh dồn số liệu thô. Mỗi con số phải kèm 1 câu ý nghĩa (ổn / cần theo dõi / nên xử lý).
+- Ưu tiên: tình trạng máy → vì sao → nên làm gì (nếu cần).
+- Câu ngắn, không jargon. Không liệt kê bảng số dài.
+"@
+        }
+        'numeric' {
+            return @"
+PHONG CÁCH TRẢ LỜI (NUMERIC — khách thích số liệu):
+- Ưu tiên số liệu: min / max / trung bình / trung vị / số mẫu / khoảng thời gian.
+- Kết luận ngắn sau mỗi nhóm chỉ số.
+- Vẫn phải có 1 dòng đánh giá thực trạng và 1–2 đề xuất cụ thể nếu cần.
+- Không bỏ qua kết luận chỉ vì đã có số.
+"@
+        }
+        default {
+            return @"
+PHONG CÁCH TRẢ LỜI (BALANCED — mặc định chuyên nghiệp):
+- Kết hợp số liệu quan trọng + giải thích ngắn + đánh giá thực trạng.
+- Cấu trúc: Kết luận → Chỉ số then chốt → Xu hướng (nếu có) → Việc nên làm / lưu ý.
+- Không dump toàn bộ số thô; chọn số có ý nghĩa vận hành Node.
+"@
+        }
+    }
+}
+
+function Get-InsightLine {
+    param($x)
+    # Sinh 1–2 dòng nhận định vận hành từ bản ghi history mới nhất
+    $tips = @()
+    $sync = [string]$x.sync
+    $docker = [string]$x.docker
+    $port = [string]$x.port
+    $ram = $null; $cpu = $null; $temp = $null
+    try { $ram = [double]$x.ram_sys } catch {}
+    try { $cpu = [double]$x.cpu_sys } catch {}
+    try {
+        if ("$($x.temp)" -notin @('','N/A','0') ) { $temp = [double]$x.temp }
+    } catch {}
+
+    if ($sync -eq 'Dong bo tot' -and $docker -eq 'RUNNING' -and $port -eq 'OPEN') {
+        $tips += 'Node đang vận hành ổn: đồng bộ tốt, Docker chạy, cổng mở.'
+    } elseif ($port -eq 'CLOSED') {
+        $tips += 'Cổng Node đang đóng — kiểm tra firewall/router hoặc container Node.'
+    } elseif ($docker -ne 'RUNNING') {
+        $tips += 'Docker không chạy — Node và các dịch vụ container sẽ dừng theo.'
+    } elseif ($sync -in @('Lech khoi','Chua dong bo')) {
+        $tips += 'Khối chưa khớp — theo dõi thêm vài chu kỳ; nếu kéo dài hãy /diagnostic.'
+    }
+
+    if ($null -ne $ram -and $ram -ge 88) { $tips += "RAM cao ($ram%) — có thể /cleanram nếu máy chậm." }
+    elseif ($null -ne $ram -and $ram -ge 75) { $tips += "RAM $ram% — mức khá cao, theo dõi nếu mở nhiều app." }
+
+    if ($null -ne $cpu -and $cpu -ge 90) { $tips += "CPU cao ($cpu%) — kiểm tra process hoặc container nặng." }
+    if ($null -ne $temp -and $temp -ge 78) { $tips += "Nhiệt $temp°C — kiểm tra tản nhiệt/quạt, tránh đặt máy kín." }
+    elseif ($null -ne $temp -and $temp -ge 70) { $tips += "Nhiệt $temp°C — chấp nhận được khi tải, vẫn nên thông thoáng." }
+
+    $crit = 0
+    try { $crit = [int]$x.critical } catch {}
+    if ($crit -gt 0) { $tips += "Có $crit sự cố nghiêm trọng được ghi nhận ở lần quét gần nhất." }
+
+    if ($tips.Count -eq 0) { $tips += 'Chưa đủ tín hiệu bất thường để đưa nhận định thêm.' }
+    return ($tips | Select-Object -First 3) -join ' '
+}
+
 function Get-NodeHistory {
     if (!(Test-Path -LiteralPath $HISTORY_FILE)) { return @() }
     try {
@@ -320,10 +429,45 @@ function Get-NodeStatus {
     $dI = if ([string]$x.docker -eq 'RUNNING') { '✅' } else { '❌' }
     $pI = if ([string]$x.port -eq 'OPEN') { '✅' } else { '❌' }
 
+    $prefs = Read-UserPreferences
+    $style = [string]$prefs.style
+    $syncShow = if ($sync -eq 'Dong bo tot') { 'Đồng bộ tốt' } elseif ($sync -eq 'Dang dong bo') { 'Đang đồng bộ' } elseif ($sync -eq 'Chua dong bo' -or $sync -eq 'Lech khoi') { 'Chưa đồng bộ' } else { $sync }
+    $insight = Get-InsightLine $x
+
+    if ($style -eq 'simple') {
+        $t = "$head`n"
+        $t += "──────────────`n"
+        $t += "🕐 Cập nhật: $time`n`n"
+        $t += "📌 Tình trạng:`n$insight`n`n"
+        $t += "Chi tiết nhanh:`n"
+        $t += "• Đồng bộ: $syncShow $sI`n"
+        $t += "• Docker: $($x.docker) $dI  ·  Cổng: $($x.port) $pI`n"
+        if ($temp -ne '—') { $t += "• Máy: RAM $($x.ram_sys)% · CPU $($x.cpu_sys)% · Nhiệt $temp°C`n" }
+        else { $t += "• Máy: RAM $($x.ram_sys)% · CPU $($x.cpu_sys)%`n" }
+        if ($critical -gt 0) { $t += "`n🚨 Cần xử lý: $critical sự cố nghiêm trọng. Gửi /diagnostic để xem chi tiết." }
+        elseif ($prefs.showTips -and $good) { $t += "`n💡 Máy đang ổn — không cần thao tác thêm." }
+        return $t.TrimEnd()
+    }
+
+    if ($style -eq 'numeric') {
+        $t = "$head`n"
+        $t += "──────────────`n"
+        $t += "time=$time | severity=$severity | critical=$critical | problems=$problem`n"
+        $t += "sync=$sync | local=$($x.local) | latest=$($x.latest)`n"
+        $t += "docker=$($x.docker) | port=$($x.port)`n"
+        $t += "ram=$($x.ram_sys)% | cpu=$($x.cpu_sys)% | temp=$temp`n"
+        if ($null -ne $x.incoming -or $null -ne $x.outgoing) {
+            $t += "incoming=$($x.incoming) | outgoing=$($x.outgoing)`n"
+        }
+        $t += "──────────────`n"
+        $t += "insight: $insight"
+        return $t
+    }
+
+    # balanced (default)
     $t = "$head`n"
     $t += "──────────────`n"
     $t += "🕐 $time`n"
-    $syncShow = if ($sync -eq 'Dong bo tot') { 'Đồng bộ tốt' } elseif ($sync -eq 'Dang dong bo') { 'Đang đồng bộ' } elseif ($sync -eq 'Chua dong bo' -or $sync -eq 'Lech khoi') { 'Chưa đồng bộ' } else { $sync }
     $t += "$sI  Đồng bộ · $syncShow`n"
     $t += "📦  Khối · $($x.local) / $($x.latest)`n"
     $t += "🐳  Docker · $($x.docker) $dI`n"
@@ -332,6 +476,11 @@ function Get-NodeStatus {
     $t += "🌡️  Nhiệt độ · $temp°C"
     if ($critical -gt 0) { $t += "`n🚨  Sự cố nghiêm trọng · $critical" }
     elseif ($severity -eq 'WARNING' -and $problem -gt 0) { $t += "`n⚠️  Cảnh báo · $problem" }
+    $t += "`n──────────────`n"
+    $t += "💬 $insight"
+    if ($prefs.showTips -and -not $good -and $critical -eq 0) {
+        $t += "`n👉 Gợi ý: /diagnostic nếu muốn phân tích sâu hơn."
+    }
     return $t
 }
 
@@ -360,19 +509,58 @@ function Get-NodeReport {
     $periodText = if ($Days -eq 1) { '24H' } elseif ($Days -eq 7) { '7 NGÀY' } elseif ($Days -eq 30) { '30 NGÀY' } else { "$Days NGÀY" }
     $head = if ($ok) { "🟢  BÁO CÁO $periodText · ỔN ĐỊNH" } else { "🟠  BÁO CÁO $periodText · CẦN THEO DÕI" }
 
+    $prefs = Read-UserPreferences
+    $style = [string]$prefs.style
+    $syncRate = if ($day.Count) { [math]::Round(100.0 * $syncOk / $day.Count, 0) } else { 0 }
+    $avgRam = if ($rams.Count) { [math]::Round(($rams|Measure-Object -Average).Average,1) } else { $null }
+    $avgTemp = if ($temps.Count) { [math]::Round(($temps|Measure-Object -Average).Average,1) } else { $null }
+
+    if ($style -eq 'simple') {
+        $t = "$head`n──────────────`n"
+        $t += "Trong $Days ngày qua bot đã quét $($day.Count) lần.`n`n"
+        if ($ok) {
+            $t += "📌 Thực trạng: Node vận hành ổn định — đồng bộ, Docker và cổng đều tốt gần như toàn bộ thời gian.`n"
+        } else {
+            $t += "📌 Thực trạng: Có lúc cần theo dõi (đồng bộ tốt $syncRate% các lần quét"
+            if ($problems -gt 0) { $t += ", $problems lần ghi nhận vấn đề" }
+            $t += ").`n"
+        }
+        if ($null -ne $avgTemp) { $t += "Nhiệt độ dao động $tempText (TB ~$avgTemp°C).`n" }
+        if ($null -ne $avgRam) { $t += "RAM phổ biến quanh $avgRam% (khoảng $ramText).`n" }
+        if ($ok) { $t += "`n💡 Không cần thao tác thêm. Giữ lịch /scheduler để bot tiếp tục canh." }
+        else { $t += "`n💡 Nên /diagnostic nếu vấn đề lặp lại, hoặc /monitor để xem trạng thái hiện tại." }
+        return $t.TrimEnd()
+    }
+
+    if ($style -eq 'numeric') {
+        $t = "$head`n"
+        $t += "period_days=$Days samples=$($day.Count) problem_runs=$problems`n"
+        $t += "sync_ok=$syncOk/$($day.Count) ($syncRate%) docker_ok=$dockerOk/$($day.Count) port_ok=$portOk/$($day.Count)`n"
+        $t += "ram=$ramText"
+        if ($null -ne $avgRam) { $t += " avg=$avgRam" }
+        $t += "`ncpu=$cpuText`n"
+        $t += "temp=$tempText"
+        if ($null -ne $avgTemp) { $t += " avg=$avgTemp" }
+        $t += "`n"
+        $t += "verdict=" + $(if ($ok) { 'STABLE' } else { 'WATCH' })
+        return $t
+    }
+
     $t = "$head`n"
     $t += "━━━━━━━━━━━━━━━━━━`n"
     $t += "📅  Khoảng thời gian · $Days ngày`n"
     $t += "📋  Lần quét · $($day.Count)`n"
-    $t += "✅  Đồng bộ · $syncOk/$($day.Count)`n"
+    $t += "✅  Đồng bộ · $syncOk/$($day.Count) ($syncRate%)`n"
     $t += "🐳  Docker · $dockerOk/$($day.Count)`n"
     $t += "🔌  Cổng · $portOk/$($day.Count)`n"
-    $t += "🧠  RAM · $ramText`n"
-    $t += "⚙️  CPU · $cpuText`n"
-    $t += "🌡️  Nhiệt độ · $tempText`n"
-    $t += "⚠️  Lần có vấn đề · $problems`n"
-    if ($ok) { $t += "`n💡 Kết luận: Pi Node hoạt động ổn định trong khoảng thời gian đã chọn." }
-    else { $t += "`n💡 Kết luận: Có ít nhất một chỉ số bất thường. Nên chạy /monitor hoặc /diagnostic để kiểm tra chi tiết." }
+    $t += "🧠  RAM · $ramText"
+    if ($null -ne $avgRam) { $t += " · TB $avgRam%" }
+    $t += "`n⚙️  CPU · $cpuText`n"
+    $t += "🌡️  Nhiệt độ · $tempText"
+    if ($null -ne $avgTemp) { $t += " · TB $avgTemp°C" }
+    $t += "`n⚠️  Lần có vấn đề · $problems`n"
+    if ($ok) { $t += "`n💡 Kết luận: Pi Node hoạt động ổn định trong khoảng thời gian đã chọn. Tiếp tục để bot canh 24/7." }
+    else { $t += "`n💡 Kết luận: Có chỉ số bất thường. Chạy /monitor hoặc /diagnostic để khoanh vùng; không vội reset nếu chỉ cảnh báo tài nguyên." }
     return $t
 }
 
@@ -961,6 +1149,8 @@ Hãy kiểm tra:
 8. Nếu không có đủ dữ liệu để kết luận, nói rõ thiếu dữ liệu.
 9. Không được coi bản ghi hiện tại là đại diện cho cả giai đoạn.
 
+$(Get-StyleInstruction)
+
 TRẢ LỜI TELEGRAM:
 🔎 Kết luận
 Nói rõ trong $Days ngày qua có hay không có dấu hiệu sự cố.
@@ -1209,6 +1399,8 @@ Tóm tắt ngắn RAM / CPU / Ổ đĩa / Nhiệt trong khoảng thời gian (d�
 
 🛠️ Gợi ý tiếp theo
 1–3 bước thực tế (mua thêm bao nhiêu, dọn ổ, kiểm tra tản nhiệt...).
+
+$(Get-StyleInstruction)
 
 QUY TẮC:
 - Không dùng bảng Markdown, không ==== / ---- / ━━━.
@@ -1763,7 +1955,108 @@ function Get-DailyDonateTip {
     return $tips[(Get-Random -Maximum $tips.Count)]
 }
 
+
+function Get-SettingsMenu {
+    $p = Read-UserPreferences
+    $styleName = switch ($p.style) {
+        'simple'  { 'Đơn giản — dễ hiểu' }
+        'numeric' { 'Số liệu — chi tiết số' }
+        default   { 'Cân bằng — chuyên nghiệp' }
+    }
+    $tips = if ($p.showTips) { 'Bật' } else { 'Tắt' }
+    $t = @"
+⚙️ CÀI ĐẶT TRẢ LỜI & TRẢI NGHIỆM
+──────────────
+Hiện tại:
+• Phong cách: $styleName
+• Gợi ý hữu ích: $tips
+
+Chọn phong cách trả lời (gõ lệnh):
+
+1️⃣  /settings style simple
+   Phù hợp khi bạn muốn giải thích dễ hiểu, ít số thô.
+   Bot nói tình trạng máy → ý nghĩa → việc nên làm.
+
+2️⃣  /settings style balanced
+   Mặc định. Có số liệu then chốt + nhận định + gợi ý ngắn.
+   Phù hợp vận hành Node hàng ngày.
+
+3️⃣  /settings style numeric
+   Ưu tiên min/max/trung bình, mẫu đo, severity.
+   Phù hợp khi bạn thích theo dõi số liệu sát.
+
+Khác:
+• /settings tips on|off  — bật/tắt dòng gợi ý
+• /settings show         — xem cấu hình hiện tại
+• /settings reset        — về mặc định (balanced + tips on)
+
+📌 Lịch quét / ngưỡng cảnh báo / tự reset:
+   Dùng /scheduler (menu riêng, có giải thích từng tham số).
+
+Các thay đổi có hiệu lực ngay, không cần restart.
+"@
+    return $t.Trim()
+}
+
+function Handle-SettingsCommand {
+    param([string]$ArgsText)
+    $a = if ($null -eq $ArgsText) { '' } else { $ArgsText.Trim() }
+    if ([string]::IsNullOrWhiteSpace($a) -or $a -match '^(show|xem|menu)?$') {
+        Send-Text (Get-SettingsMenu)
+        return
+    }
+    $parts = @($a -split '\s+', 3)
+    $cmd = $parts[0].ToLowerInvariant()
+    $val = if ($parts.Count -gt 1) { $parts[1].Trim().ToLowerInvariant() } else { '' }
+
+    $prefs = Read-UserPreferences
+    $msg = ''
+
+    switch -Regex ($cmd) {
+        '^(style|phongcach|phong)$' {
+            if ($val -notin @('simple','balanced','numeric','de','dễ','so','số')) {
+                Send-Text "⚠️ Chọn: simple | balanced | numeric`nVí dụ: /settings style simple"
+                return
+            }
+            if ($val -in @('de','dễ')) { $val = 'simple' }
+            if ($val -in @('so','số')) { $val = 'numeric' }
+            $prefs.style = $val
+            Save-UserPreferences $prefs | Out-Null
+            $label = switch ($val) {
+                'simple'  { 'Đơn giản — dễ hiểu' }
+                'numeric' { 'Số liệu — chi tiết số' }
+                default   { 'Cân bằng — chuyên nghiệp' }
+            }
+            $msg = "✅ Đã chọn phong cách: *$label*`nGửi /status hoặc hỏi tự nhiên để xem khác biệt."
+        }
+        '^(tips|tip|goy|gợi)$' {
+            if ($val -match '^(on|bat|bật|1|true)$') {
+                $prefs.showTips = $true
+                $msg = '✅ Đã BẬT gợi ý hữu ích trong trả lời.'
+            } elseif ($val -match '^(off|tat|tắt|0|false)$') {
+                $prefs.showTips = $false
+                $msg = '⏸️ Đã TẮT gợi ý hữu ích.'
+            } else {
+                Send-Text '⚠️ Dùng: /settings tips on|off'
+                return
+            }
+            Save-UserPreferences $prefs | Out-Null
+        }
+        '^(reset|macdinh|mặcđịnh)$' {
+            $prefs = Get-DefaultUserPreferences
+            Save-UserPreferences $prefs | Out-Null
+            $msg = '✅ Đã về mặc định: phong cách cân bằng, gợi ý bật.'
+        }
+        default {
+            Send-Text (Get-SettingsMenu)
+            return
+        }
+    }
+    if ($msg) { Send-Text $msg }
+}
+
 function Show-Help {
+
     return @"
 🤖 PI NODE CONTROLLER
 
@@ -1777,6 +2070,7 @@ Bot giúp bạn giám sát • bảo trì • xử lý sự cố Pi Node trực 
 /status — Trạng thái Node
 /monitor — Kiểm tra chuyên sâu
 /report — Báo cáo hệ thống
+/settings — Phong cách trả lời (đơn giản / số liệu / cân bằng)
 /scheduler — Xem & chỉnh lịch tự động
 
 🛠️ BẢO TRÌ
@@ -2047,16 +2341,24 @@ function Get-SchedulerStatus {
     $t += "🛠️ Bảo trì: $dayName $($script:SchedMaintTime)`n"
     $t += "🚨 Tự reset khi lỗi liên tiếp: $auto (sau $($script:SchedStreakNeed) lần)`n"
     $t += "📉 Chuỗi lỗi hiện tại: $($s.problemStreak)`n`n"
-    $t += "Điều khiển:`n"
+    $t += "──────────────`n"
+    $t += "📖 Giải thích nhanh:`n"
+    $t += "• interval = chu kỳ quét khi máy ổn`n"
+    $t += "• rescan = chu kỳ quét lại khi vừa phát hiện lỗi`n"
+    $t += "• report = các giờ gửi báo cáo tóm tắt trong ngày`n"
+    $t += "• autoreset = chỉ reset khi đủ tín hiệu nghiêm trọng lặp lại`n"
+    $t += "• streak = số lần lỗi liên tiếp trước khi reset`n`n"
+    $t += "Điều khiển (gõ đúng cú pháp):`n"
     $t += "/scheduler on|off`n"
-    $t += "/scheduler interval 59`n"
+    $t += "/scheduler interval 59     (5–1440 phút)`n"
     $t += "/scheduler rescan 10`n"
     $t += "/scheduler report 7,18`n"
     $t += "/scheduler maintenance 23:00`n"
-    $t += "/scheduler day 0   (0=CN … 6=T7)`n"
+    $t += "/scheduler day 0           (0=CN … 6=T7)`n"
     $t += "/scheduler autoreset on|off`n"
     $t += "/scheduler streak 3`n"
-    $t += "/scheduler defaults"
+    $t += "/scheduler defaults`n`n"
+    $t += "👉 Phong cách trả lời (đơn giản/số liệu): /settings"
     return $t
 }
 
@@ -2378,6 +2680,7 @@ function Handle-Message {
         '(?i)^/status(@\w+)?$'     { Send-Text (Get-NodeStatus); break }
         '(?i)^/monitor(s)?(@\w+)?$' { Invoke-SmartMonitor; break }
         '(?i)^/scheduler(?:@\w+)?(?:\s+(.*))?$' { Handle-SchedulerCommand -ArgsText $Matches[1]; break }
+        '(?i)^/settings(?:@\w+)?(?:\s+(.*))?$' { Handle-SettingsCommand -ArgsText $Matches[1]; break }
         '(?i)^/report(@\w+)?$'     { Send-Text ((Get-NodeReport) + "`n`n" + (Get-DailyDonateTip)); break }
         '(?i)^/logs(@\w+)?$'       { Send-Text (Get-Logs); break }
         '(?i)^/docker(@\w+)?$'     { Send-Text (Get-DockerStatus); break }
