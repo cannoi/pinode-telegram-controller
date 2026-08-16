@@ -1,14 +1,14 @@
 ﻿# PI NODE CENTRAL CONFIG
 # Windows PowerShell 5.1 / Portable
-# KHONG LUU TOKEN/API KEY VAO GIT. Dung Setup_Config.ps1 de nhap cau hinh.
+# CHI FILE NAY CHUA TOKEN / API / CAC CAI DAT CHUNG.
 # Dien day du cac gia tri ben duoi truoc khi chay Controller / Monitor / Maintenance.
 
-$BotToken = ""
-$ChatId = ""
+$BotToken = "PUT_TELEGRAM_BOT_TOKEN_HERE"
+$ChatId = "PUT_TELEGRAM_CHAT_ID_HERE"
 
 # Gemini Vision API (bat buoc de /monitor doc duoc thong so tu cua so PiCheck)
 # Lay key tai: https://aistudio.google.com/apikey
-$GeminiApiKey = ""
+$GeminiApiKey = "PUT_GEMINI_API_KEY_HERE"
 $GeminiNaturalLanguageEnabled = $true
 $GeminiKnowledgeEnabled = $true
 $GeminiModels = @(
@@ -40,7 +40,7 @@ $MaxLogBytes = 2MB
 
 $RamAlert = 88
 $TempAlert = 78
-$IncomingLow = 0
+$IncomingLow = 3
 $CpuAlert = 90
 $WindowKeywords = @("PiCheck", "Pi Network", "Pi Node", "Pi Desktop")
 $MonitorSelfNotify = $false  # Controller xu ly alert; monitor khong tu spam
@@ -60,7 +60,7 @@ $MaintenanceScript = Join-Path $DataDir 'Weekly_Maintenance.ps1'
 $DiagnosticScript = Join-Path $DataDir 'Pi_Node_Diagnostic_PRO.ps1'
 $ResetNodeScript = Join-Path $DataDir 'Reset_Node_Network.ps1'
 $ProblemRescanMinutes = 10
-$ProblemStreakBeforeReset = 5
+$ProblemStreakBeforeReset = 3
 $AutoResetOnSyncPortFail = $true
 $SendTeleScript = Join-Path $DataDir 'send_tele.ps1'
 
@@ -74,7 +74,7 @@ $WeeklyMaintenanceTime = '23:00'
 $SchedulerNotifyStart = $false
 $SchedulerNotifyFinish = $false
 $AlertRepeat = 3
-$AlertRepeatDelaySec = 5
+$AlertRepeatDelaySec = 2
 $AlertPlaySound = $true
 
 $Registered = [ordered]@{
