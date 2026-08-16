@@ -60,7 +60,7 @@ $MaintenanceScript = Join-Path $DataDir 'Weekly_Maintenance.ps1'
 $DiagnosticScript = Join-Path $DataDir 'Pi_Node_Diagnostic_PRO.ps1'
 $ResetNodeScript = Join-Path $DataDir 'Reset_Node_Network.ps1'
 $ProblemRescanMinutes = 10
-$ProblemStreakBeforeReset = 3
+$ProblemStreakBeforeReset = 5
 $AutoResetOnSyncPortFail = $true
 $SendTeleScript = Join-Path $DataDir 'send_tele.ps1'
 
@@ -70,11 +70,11 @@ $MonitorIntervalMinutes = 60
 $MonitorRunOnControllerStart = $false
 $DailyReportHours = @(7, 18)
 $MaintenanceDayOfWeek = 0
-$WeeklyMaintenanceTime = '23:00'
+$WeeklyMaintenanceTime = '03:00'
 $SchedulerNotifyStart = $false
 $SchedulerNotifyFinish = $false
 $AlertRepeat = 3
-$AlertRepeatDelaySec = 2
+$AlertRepeatDelaySec = 5
 $AlertPlaySound = $true
 
 $Registered = [ordered]@{
