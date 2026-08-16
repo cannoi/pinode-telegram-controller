@@ -44,3 +44,11 @@ If Gemini is unavailable, the controller falls back to deterministic statistics.
 - Câu hỏi nâng cấp phần cứng cần kết hợp: RAM history + CPU history + nhiệt + ổ đĩa + cấu hình hiện tại.
 - Intent: ADVICE.
 - Không trả về chỉ một bảng thống kê RAM khi người dùng hỏi so sánh nhiều thành phần.
+
+
+## NHẬN ĐỊNH VẬN HÀNH (bắt buộc)
+Không chỉ liệt kê số. Mỗi báo cáo cần:
+1) Thực trạng máy trong giai đoạn (ổn / cần theo dõi / cần xử lý)
+2) Vì sao (dựa trên dữ liệu)
+3) Việc nên làm hoặc lưu ý hữu ích (nếu có)
+Tôn trọng phong cách simple|balanced|numeric của người dùng.
