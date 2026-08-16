@@ -40,7 +40,7 @@ $MaxLogBytes = 2MB
 
 $RamAlert = 88
 $TempAlert = 78
-$IncomingLow = 3
+$IncomingLow = 0
 $CpuAlert = 90
 $WindowKeywords = @("PiCheck", "Pi Network", "Pi Node", "Pi Desktop")
 $MonitorSelfNotify = $false  # Controller xu ly alert; monitor khong tu spam
@@ -60,7 +60,7 @@ $MaintenanceScript = Join-Path $DataDir 'Weekly_Maintenance.ps1'
 $DiagnosticScript = Join-Path $DataDir 'Pi_Node_Diagnostic_PRO.ps1'
 $ResetNodeScript = Join-Path $DataDir 'Reset_Node_Network.ps1'
 $ProblemRescanMinutes = 10
-$ProblemStreakBeforeReset = 3
+$ProblemStreakBeforeReset = 5
 $AutoResetOnSyncPortFail = $true
 $SendTeleScript = Join-Path $DataDir 'send_tele.ps1'
 
@@ -74,7 +74,7 @@ $WeeklyMaintenanceTime = '23:00'
 $SchedulerNotifyStart = $false
 $SchedulerNotifyFinish = $false
 $AlertRepeat = 3
-$AlertRepeatDelaySec = 2
+$AlertRepeatDelaySec = 5
 $AlertPlaySound = $true
 
 $Registered = [ordered]@{
