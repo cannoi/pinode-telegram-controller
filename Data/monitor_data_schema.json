@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "principles": [
+    "portable",
+    "read_only",
+    "source_aware",
+    "no_fake_zero",
+    "ai_filterable"
+  ],
+  "fields": [
+    "timestamp",
+    "system",
+    "temperature",
+    "docker",
+    "pi_node",
+    "health"
+  ],
+  "temperature": {
+    "source": "OpenHardwareMonitorLib|other|null",
+    "available": "boolean"
+  },
+  "ai": {
+    "input": "normalized JSON",
+    "output": "alerts + explanation + confidence",
+    "no_mutation": true
+  }
+}

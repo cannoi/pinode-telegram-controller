@@ -4,9 +4,20 @@ Dung lam nguon kien thuc cho AI. Knowledge Base chinh duoc nhung vao Controller 
 
 Muc dich: quan ly Pi Node qua Telegram; monitor, report, diagnostic, Docker, disk, screenshot, clean RAM, maintenance, reset va AI.
 
+NGUON DU LIEU (QUAN TRONG):
+- Smart Monitor v10 doc TRUC TIEP: stellar-core (docker exec http-command info/peers), Docker info/ps/stats, Win32 CPU/RAM/disk, port 31401-31403, OpenHardwareMonitorLib (nhiet do).
+- KHONG dung OCR/chup man hinh de lay thong so Node.
+- Moi canh bao/phan tich PHAI dua tren so lieu do duoc trong node_history.json. Cam suy doan, cam bia so.
+- Truong chinh: sync, local/latest ledger, ledger_age, incoming/outgoing, temp, ram_sys, cpu_sys, docker, port, severity, critical_list, warning_list, evidence, quorum_phase.
+
+LICH QUET:
+- Mac dinh moi 5 phut. Khi loi: quet day 1 phut (toi da 10 lan). Disk mau thua (~30 phut). History toi da ~2500 mau.
+- Auto-reset toi da 1 lan/ngay; can >=2 tin hieu nang (sync/port/docker/net/peer/age).
+
 File: Config/PiNode_Config.ps1 = cau hinh Telegram/Gemini/Hermes/nguong/lich/duong dan.
 File: Controller/PiNode_Telegram_Controller_PRO_v2.0.ps1 = bo nao trung tam.
-Data/PiNode_SmartMonitor_v9_CentralConfig.ps1 = monitor va history.
+Data/PiNode_SmartMonitor_v9_CentralConfig.ps1 = monitor live + history (ten file giu nguyen de ghi de GitHub).
+Data/OpenHardwareMonitorLib.dll = cam bien nhiet (tuy chon).
 Data/CleanRAM_PiNode.ps1 = don RAM.
 Data/Weekly_Maintenance.ps1 = bao tri.
 Data/Pi_Node_Diagnostic_PRO.ps1 = chan doan.
@@ -21,8 +32,18 @@ Cai dat: Setup_Config -> Check_Installation -> Start_Controller -> /help /status
 
 Natural language: STATUS, MONITOR, REPORT, DOCKER, DISK, SCREENSHOT, LOGS, SCHEDULER, DIAGNOSTIC, CLEANRAM, MAINTENANCE_CONFIRM, RESET_CONFIRM, ASK_HERMES, KNOWLEDGE.
 
-Khong doan du lieu may. Khong tu y reset/maintenance. Khong tiet lo secret.
+Huong dan nguoi dung: ngan, ro, uu tien /status /monitor /report /diagnostic /scheduler. Khong doan du lieu may. Khong tu y reset/maintenance. Khong tiet lo secret.
 
+THOI QUEN LENH (Data/user_habits.json):
+- Controller tu hoc cum tu nguoi dung map sang intent (STATUS/MONITOR/...).
+- Khi hits >=2 (exact) hoac >=3 (contains), bo qua Gemini de tra loi nhanh.
+- Neu user phai noi lai / lam ro trong 90s, ghi correction de lan sau dung hon.
+
+TIN HIEU SOM (peer):
+- Incoming+Outgoing = 0 hoac sut giam >50% so voi mau truoc = canh bao som (thuong truoc khi sync hong).
+- Peer tang lai = tin hieu Node dang on dinh hon.
+
+MOI THONG BAO LOI phai co: (1) van de la gi, (2) rui ro/tac dong, (3) so lieu do duoc, (4) goi y /status /diagnostic. Cam ket luan khong co bang chung.
 
 ## THONG KE DONG THEO KHOANG THOI GIAN
 - AI phai hieu khoang thoi gian tu cau hoi tu nhien.

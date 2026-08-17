@@ -1,703 +1,616 @@
-﻿# PI NODE SMART MONITOR v9.0 PORTABLE
-# Windows PowerShell 5.1
-# File nay co the dat o BAT KY thu muc nao.
-# Moi duong dan du lieu deu tu dong tinh theo thu muc chua file.
+# PI NODE SMART MONITOR v10.0 — Live Data Collector (read-only)
+# Thay thế OCR/chụp màn hình bằng stellar-core + Docker + hệ thống + cảm biến.
+# Nguyên tắc: chỉ dữ liệu thật, không suy đoán, không bịa số 0 giả.
+# Windows PowerShell 5.1 — portable theo thư mục Data/
 
-$ErrorActionPreference='Continue'
-
-# ================= CENTRAL CONFIG =================
-# Smart Monitor nam trong:
-#   <AppRoot>\Data\PiNode_SmartMonitor_v9_CentralConfig.ps1
-#
-# Config chung cua app:
-#   <AppRoot>\Config\PiNode_Config.ps1
+$ErrorActionPreference = 'Continue'
 
 $BASE_DIR = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($BASE_DIR)) {
     $BASE_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 }
-
 $APP_ROOT = Split-Path -Parent $BASE_DIR
 $CONFIG_FILE = Join-Path $APP_ROOT 'Config\PiNode_Config.ps1'
 
 if (!(Test-Path -LiteralPath $CONFIG_FILE)) {
-    Write-Host "LOI: Khong tim thay Config trung tam:" -ForegroundColor Red
-    Write-Host $CONFIG_FILE -ForegroundColor Red
+    Write-Host "LOI: Khong tim thay Config trung tam: $CONFIG_FILE" -ForegroundColor Red
     exit 20
 }
-
-try {
-    . $CONFIG_FILE
-} catch {
-    Write-Host "LOI: Khong nap duoc Config trung tam:" -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
+try { . $CONFIG_FILE } catch {
+    Write-Host "LOI: Khong nap duoc Config: $($_.Exception.Message)" -ForegroundColor Red
     exit 21
 }
 
-$BOT_TOKEN       = $BotToken
-$CHAT_ID         = $ChatId
-$GEMINI_API_KEY  = $GeminiApiKey
-$GEMINI_MODELS   = $GeminiModels
-$RAM_ALERT       = $RamAlert
-$TEMP_ALERT      = $TempAlert
-$INCOMING_LOW    = $IncomingLow
-$CPU_ALERT       = $CpuAlert
-$WINDOW_KEYWORDS = $WindowKeywords
+$BOT_TOKEN      = $BotToken
+$CHAT_ID        = $ChatId
+$RAM_ALERT      = if ($RamAlert) { [double]$RamAlert } else { 88 }
+$TEMP_ALERT     = if ($TempAlert) { [double]$TempAlert } else { 78 }
+$INCOMING_LOW   = if ($IncomingLow) { [double]$IncomingLow } else { 3 }
+$CPU_ALERT      = if ($CpuAlert) { [double]$CpuAlert } else { 90 }
+$LEDGER_AGE_MAX = if ($LedgerAgeMaxSec) { [int]$LedgerAgeMaxSec } else { 30 }
+$DISK_FREE_MIN  = if ($DiskFreeMinGB) { [double]$DiskFreeMinGB } else { 20 }
+$HISTORY_MAX    = if ($NodeHistoryMaxRecords) { [int]$NodeHistoryMaxRecords } else { 2500 }
+$DISK_SAMPLE_MINUTES = if ($DiskSampleMinutes) { [int]$DiskSampleMinutes } else { 30 }
 
-if (!$GEMINI_MODELS)   { $GEMINI_MODELS=@('gemini-3.6-flash','gemini-3.5-flash','gemini-2.5-flash','gemini-2.0-flash') }
-if (!$RAM_ALERT)       { $RAM_ALERT=88 }
-if (!$TEMP_ALERT)      { $TEMP_ALERT=78 }
-if (!$INCOMING_LOW)    { $INCOMING_LOW=3 }
-if (!$CPU_ALERT)       { $CPU_ALERT=90 }
-if (!$WINDOW_KEYWORDS) { $WINDOW_KEYWORDS=@('PiCheck','Pi Network','Pi Node') }
-
-$HISTORY_DIR=Join-Path $BASE_DIR 'History\ScreenMonitor'
-$LOGFILE=Join-Path $BASE_DIR 'Monitor_Node.log'
-$DATA_FILE=Join-Path $BASE_DIR 'node_history.json'
-$CLEAN_SCRIPT=Join-Path $BASE_DIR 'CleanRAM_PiNode.ps1'
-New-Item -ItemType Directory -Path $HISTORY_DIR -Force -ErrorAction SilentlyContinue|Out-Null
+$HISTORY_DIR = Join-Path $BASE_DIR 'History\ScreenMonitor'
+$LOGFILE     = Join-Path $BASE_DIR 'Monitor_Node.log'
+$DATA_FILE   = Join-Path $BASE_DIR 'node_history.json'
+$COLLECTOR_STATE = Join-Path $BASE_DIR 'collector_state.json'
+$DLL_PATH    = Join-Path $BASE_DIR 'OpenHardwareMonitorLib.dll'
+New-Item -ItemType Directory -Path $HISTORY_DIR -Force -ErrorAction SilentlyContinue | Out-Null
 
 function Write-Log {
- param([string]$Text)
- try {
-  $line="$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $Text"
-  Write-Host $line -ForegroundColor Cyan
-  $line|Out-File -LiteralPath $LOGFILE -Append -Encoding utf8
- } catch {}
+    param([string]$Text)
+    try {
+        $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $Text"
+        Write-Host $line -ForegroundColor Cyan
+        $line | Out-File -LiteralPath $LOGFILE -Append -Encoding utf8
+    } catch {}
 }
 
 function Send-Telegram {
- param([string]$Text,[int]$Times=1)
- if ([string]::IsNullOrWhiteSpace($BOT_TOKEN) -or $BOT_TOKEN -eq 'PUT_TELEGRAM_BOT_TOKEN_HERE') {
-  Write-Log 'Telegram chua cau hinh'; return
- }
- for($i=1;$i -le $Times;$i++){
-  try {
-   $u="https://api.telegram.org/bot$BOT_TOKEN/sendMessage?chat_id=$CHAT_ID&text=$([uri]::EscapeDataString($Text))"
-   Invoke-RestMethod -Uri $u -Method Get -TimeoutSec 15|Out-Null
-   Write-Log "Telegram OK ($i/$Times)"
-  } catch { Write-Log "Telegram LOI: $($_.Exception.Message)" }
-  if($i -lt $Times){Start-Sleep 2}
- }
+    param([string]$Text, [int]$Times = 1)
+    if ([string]::IsNullOrWhiteSpace($BOT_TOKEN) -or $BOT_TOKEN -eq 'PUT_TELEGRAM_BOT_TOKEN_HERE') {
+        Write-Log 'Telegram chua cau hinh'; return
+    }
+    for ($i = 1; $i -le $Times; $i++) {
+        try {
+            $u = "https://api.telegram.org/bot$BOT_TOKEN/sendMessage?chat_id=$CHAT_ID&text=$([uri]::EscapeDataString($Text))"
+            Invoke-RestMethod -Uri $u -Method Get -TimeoutSec 15 | Out-Null
+            Write-Log "Telegram OK ($i/$Times)"
+        } catch { Write-Log "Telegram LOI: $($_.Exception.Message)" }
+        if ($i -lt $Times) { Start-Sleep 2 }
+    }
 }
 
 function Load-History {
- if(Test-Path -LiteralPath $DATA_FILE){
-  try {
-   $x=Get-Content -LiteralPath $DATA_FILE -Raw -Encoding UTF8|ConvertFrom-Json
-   if($x -isnot [array]){$x=@($x)}
-   return @($x)
-  } catch {Write-Log "History loi: $($_.Exception.Message)"}
- }
- return @()
+    if (!(Test-Path -LiteralPath $DATA_FILE)) { return @() }
+    try {
+        $raw = Get-Content -LiteralPath $DATA_FILE -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+        $x = $raw | ConvertFrom-Json
+        if ($x -is [array]) { return @($x) }
+        return @($x)
+    } catch {
+        Write-Log "Load history loi: $($_.Exception.Message)"
+        return @()
+    }
 }
 
 function Save-History {
- param([array]$List)
- $cut=(Get-Date).AddHours(-48)
- try {
-  @($List|Where-Object{try{[datetime]$_.time -gt $cut}catch{$true}})|
-   ConvertTo-Json -Depth 8|Out-File -LiteralPath $DATA_FILE -Encoding utf8
- } catch {Write-Log "Save history loi: $($_.Exception.Message)"}
-}
-
-# ================= SCREEN CAPTURE =================
-$dll="$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Drawing.dll"
-if(!(Test-Path $dll)){$dll="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\System.Drawing.dll"}
-if(!(Test-Path $dll)){Write-Log 'Thieu System.Drawing';exit 10}
-try{Add-Type -Path $dll -ErrorAction Stop}catch{}
-try{Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue}catch{}
-
-if(-not([System.Management.Automation.PSTypeName]'PiWin').Type){
-try{
-Add-Type -TypeDefinition @"
-using System;
-using System.Text;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
-using System.Drawing;
-public class PiWin {
-  public delegate bool E(IntPtr h,IntPtr l);
-  [DllImport("user32.dll")] public static extern bool EnumWindows(E cb,IntPtr l);
-  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h,StringBuilder s,int m);
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h,out R r);
-  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h,int c);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);
-  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
-  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a,uint b,bool f);
-  [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
-  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk,byte bScan,uint dwFlags,UIntPtr dwExtra);
-  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr hAfter,int x,int y,int cx,int cy,uint flags);
-  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
-  [StructLayout(LayoutKind.Sequential)] public struct R { public int Left,Top,Right,Bottom; }
-  static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-  static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
-  const uint SWP_NOMOVE=0x0002, SWP_NOSIZE=0x0001, SWP_SHOWWINDOW=0x0040;
-  const int SW_RESTORE=9, SW_SHOW=5, SW_SHOWNA=8;
-  const byte VK_MENU=0x12; const uint KEYEVENTF_KEYUP=0x0002;
-
-  public static string Title(IntPtr h){ var s=new StringBuilder(1024); GetWindowText(h,s,1024); return s.ToString(); }
-
-  // Tim TAT CA cua so khop keyword (khong chi cai dau)
-  public static IntPtr[] FindAll(string[] keys){
-    var list=new List<IntPtr>();
-    EnumWindows((h,l)=>{
-      if(!IsWindow(h)) return true;
-      string t=Title(h);
-      if(String.IsNullOrWhiteSpace(t)) return true;
-      foreach(var k in keys){
-        if(!String.IsNullOrWhiteSpace(k) && t.IndexOf(k,StringComparison.OrdinalIgnoreCase)>=0){
-          if(!list.Contains(h)) list.Add(h);
-          break;
-        }
-      }
-      return true;
-    },IntPtr.Zero);
-    return list.ToArray();
-  }
-
-  public static IntPtr Find(string[] keys){
-    var all=FindAll(keys);
-    return all.Length>0 ? all[0] : IntPtr.Zero;
-  }
-
-  // Uu tien cua so co title chua prefer (vd PiCheck)
-  public static IntPtr FindPreferred(string[] keys, string prefer){
-    var all=FindAll(keys);
-    if(all.Length==0) return IntPtr.Zero;
-    if(!String.IsNullOrWhiteSpace(prefer)){
-      foreach(var h in all){
-        if(Title(h).IndexOf(prefer,StringComparison.OrdinalIgnoreCase)>=0) return h;
-      }
-    }
-    return all[0];
-  }
-
-  // Force dua cua so len tren cung - vuot Windows focus steal protection
-  public static void ForceFocus(IntPtr h){
-    if(h==IntPtr.Zero || !IsWindow(h)) return;
-    try{
-      AllowSetForegroundWindow(-1); // ASFW_ANY
-      if(IsIconic(h)) ShowWindow(h, SW_RESTORE);
-      ShowWindow(h, SW_SHOW);
-      BringWindowToTop(h);
-      // Topmost flash roi bo topmost = dua len mat
-      SetWindowPos(h, HWND_TOPMOST, 0,0,0,0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW);
-      SetWindowPos(h, HWND_NOTOPMOST, 0,0,0,0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW);
-      // Alt key trick de Windows cho phep SetForegroundWindow
-      keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
-      keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-      SetForegroundWindow(h);
-      uint pid=0; uint t=GetWindowThreadProcessId(h, out pid); uint c=GetCurrentThreadId();
-      if(t!=c && t!=0){
-        AttachThreadInput(c,t,true);
-        BringWindowToTop(h);
-        SetForegroundWindow(h);
-        AttachThreadInput(c,t,false);
-      }
-      SetForegroundWindow(h);
-    }catch{}
-  }
-
-  // Backward compatible
-  public static void Focus(IntPtr h){ ForceFocus(h); }
-
-  public static bool Capture(IntPtr h,string path){
-    R r; if(!GetWindowRect(h,out r)) return false;
-    int w=r.Right-r.Left, hh=r.Bottom-r.Top;
-    if(w<80||hh<80) return false;
-    using(var b=new Bitmap(w,hh))
-    using(var g=Graphics.FromImage(b)){
-      g.CopyFromScreen(r.Left,r.Top,0,0,new Size(w,hh),CopyPixelOperation.SourceCopy);
-      b.Save(path,System.Drawing.Imaging.ImageFormat.Png);
-    }
-    return true;
-  }
-}
-"@ -ReferencedAssemblies $dll -ErrorAction Stop
-}catch{Write-Log "Helper loi: $($_.Exception.Message)";exit 12}
-}
-
-function Capture-FullScreen {
- param([string]$Path)
- try {
-  $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-  $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height)
-  $g=[System.Drawing.Graphics]::FromImage($bmp)
-  $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size)
-  $bmp.Save($Path,[System.Drawing.Imaging.ImageFormat]::Png)
-  $g.Dispose();$bmp.Dispose();return $true
- } catch {return $false}
-}
-
-# ================= GEMINI =================
-function Invoke-GeminiVision {
- param([string]$ImagePath,[string]$SourceHint='PiCheck')
- if(!(Test-Path $ImagePath)-or [string]::IsNullOrWhiteSpace($GEMINI_API_KEY)-or $GEMINI_API_KEY -eq 'PUT_GEMINI_API_KEY_HERE'){return $null}
- try{$b64=[Convert]::ToBase64String([IO.File]::ReadAllBytes($ImagePath))}catch{return $null}
-
-# Prompt toi uu cho PiCheck 21.x (Monitor tab) + Pi Desktop Troubleshooting
-$src = if ($SourceHint) { $SourceHint } else { 'PiCheck' }
-$prompt=@"
-You are reading a Windows screenshot of Pi Node software.
-
-DATA SOURCE PRIORITY (follow strictly):
-1) If the image shows a window titled like "PiCheck ..." (e.g. PiCheck 21.2.0 - Running Admin Mode): READ DATA FROM PICHECK ONLY.
-2) If PiCheck is NOT visible but "Pi Desktop" (Troubleshooting / Diagnostics) is visible: READ FROM PI DESKTOP.
-3) Current capture source hint from the system: $src
-
-=== IF SOURCE IS PiCheck (Monitor tab) ===
-- State : Synced/Syncing -> sync_state
-- Large Outgoing / Incoming numbers at top -> outgoing, incoming
-- Block Number(Local/Latest) e.g. 10381480 / 10381480 (0) -> local_block, latest_block (two integers only)
-- Internet connection OK/ERROR -> internet
-- Blockchain control OK/ERROR -> blockchain_control
-- Availability large percent e.g. 97.38% -> availability (number only)
-- Bottom CPU line e.g. 8% and 54 C -> cpu_percent, cpu_temp
-- Bottom RAM line e.g. 44% -> ram_percent
-- Health 31401/31402/31403 100% -> ports OK
-
-=== IF SOURCE IS PiDesktop (Troubleshooting) ===
-- Consensus "State: Synced!" -> sync_state = Synced
-- Outgoing connections: N -> outgoing
-- Incoming connections: N -> incoming
-- Latest block: ... (if only text like "a few seconds ago", set latest_block N/A unless a number is shown)
-- Consensus container running / Node switch on -> helps confirm node healthy
-- Supporting other nodes Yes/No
-
-Return PURE JSON only (no markdown):
-{
-  "picheck_found": true,
-  "data_source": "PiCheck or PiDesktop",
-  "sync_state": "Synced|Syncing|Not Synced|N/A",
-  "outgoing": 0,
-  "incoming": 0,
-  "local_block": 0,
-  "latest_block": 0,
-  "internet": "OK|ERROR|N/A",
-  "blockchain_control": "OK|ERROR|N/A",
-  "cpu_percent": 0,
-  "cpu_temp": 0,
-  "ram_percent": 0,
-  "availability": 0,
-  "port_31401": "OK|N/A",
-  "port_31402": "OK|N/A",
-  "port_31403": "OK|N/A"
-}
-
-Rules:
-- Prefer PiCheck numbers when both windows appear.
-- Numbers only for numeric fields (no % units commas).
-- Do not invent values. If unreadable use "N/A".
-- If neither PiCheck nor Pi Desktop data visible: picheck_found=false.
-"@
-
-
-$bodyObj = @{
-  contents = @(@{
-    parts = @(
-      @{ text = $prompt },
-      @{ inline_data = @{ mime_type = 'image/png'; data = $b64 } }
-    )
-  })
-  generationConfig = @{
-    temperature = 0.1
-    maxOutputTokens = 1024
-  }
-}
-$body = $bodyObj | ConvertTo-Json -Depth 12 -Compress
-
-function ConvertFrom-AiJson([string]$raw) {
-  if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
-  $t = $raw.Trim()
-  $t = $t -replace '(?s)```json\s*','' -replace '(?s)```\s*',''
-  $t = $t.Trim()
-  # Lay object JSON dau tien neu AI them text
-  $m = [regex]::Match($t, '\{[\s\S]*\}')
-  if ($m.Success) { $t = $m.Value }
-  try { return ($t | ConvertFrom-Json) } catch {
-    Write-Log "AI JSON parse loi: $($_.Exception.Message) raw=$($t.Substring(0,[Math]::Min(200,$t.Length)))"
-    return $null
-  }
-}
-
-function Normalize-AiResult($ai) {
-  if ($null -eq $ai) { return $null }
-  # Chuan hoa so: bo dau phay, %, C, chu
-  foreach ($n in @('outgoing','incoming','local_block','latest_block','cpu_percent','cpu_temp','ram_percent','availability')) {
-    if ($null -eq $ai.$n) { continue }
-    $s = [string]$ai.$n
-    if ($s -match '(?i)n/?a') { $ai | Add-Member -NotePropertyName $n -NotePropertyValue 'N/A' -Force; continue }
-    $s2 = ($s -replace ',','' -replace '%','' -replace '[^\d\.\-]','').Trim()
-    if ($s2 -match '^-?\d+(\.\d+)?$') {
-      if ($n -in @('outgoing','incoming','local_block','latest_block','cpu_percent','ram_percent')) {
-        $ai | Add-Member -NotePropertyName $n -NotePropertyValue ([int][double]$s2) -Force
-      } else {
-        $ai | Add-Member -NotePropertyName $n -NotePropertyValue ([math]::Round([double]$s2,2)) -Force
-      }
-    }
-  }
-  # sync_state
-  if ($ai.sync_state) {
-    $ss = [string]$ai.sync_state
-    if ($ss -match '(?i)synced' -and $ss -notmatch '(?i)not') { $ai | Add-Member -NotePropertyName sync_state -NotePropertyValue 'Synced' -Force }
-    elseif ($ss -match '(?i)syncing') { $ai | Add-Member -NotePropertyName sync_state -NotePropertyValue 'Syncing' -Force }
-    elseif ($ss -match '(?i)not') { $ai | Add-Member -NotePropertyName sync_state -NotePropertyValue 'Not Synced' -Force }
-  }
-  return $ai
-}
-
-foreach($model in $GEMINI_MODELS){
- try{
-  Write-Log "AI dang doc model=$model"
-  $uri="https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=$GEMINI_API_KEY"
-  $r=Invoke-RestMethod -Uri $uri -Method Post -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json; charset=utf-8' -TimeoutSec 60
-  $txt = $null
-  try { $txt = $r.candidates[0].content.parts[0].text } catch {}
-  if ($txt) {
-    $parsed = ConvertFrom-AiJson $txt
-    $parsed = Normalize-AiResult $parsed
-    if ($parsed) {
-      Write-Log "AI OK model=$model sync=$($parsed.sync_state) in=$($parsed.incoming) out=$($parsed.outgoing) local=$($parsed.local_block) temp=$($parsed.cpu_temp)"
-      return $parsed
-    }
-  } else {
-    Write-Log "AI $model khong co text tra ve"
-  }
- }catch{Write-Log "AI $model loi: $($_.Exception.Message)"}
-}
-return $null
-}
-
-# ================= MAIN =================
-Write-Log '========== BAT DAU v9.0 PORTABLE =========='
-Write-Log "BASE_DIR=$BASE_DIR"
-$Now=Get-Date;$Hour=$Now.Hour
-$History=@(Load-History)
-$Last=if($History.Count){$History[-1]}else{$null}
-
-$OS=Get-CimInstance Win32_OperatingSystem
-$RAM=[int]((($OS.TotalVisibleMemorySize-$OS.FreePhysicalMemory)/$OS.TotalVisibleMemorySize)*100)
-$CPU=[int]((Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average)
-$FreeGB=[math]::Round((Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace/1GB,1)
-$Uptime='{0} ngay {1} gio'-f ($Now-$OS.LastBootUpTime).Days,($Now-$OS.LastBootUpTime).Hours
-$Net='OFFLINE';$Ping='N/A'
-$p=Test-Connection 8.8.8.8 -Count 1 -ErrorAction SilentlyContinue
-if($p){$Net='ONLINE';$Ping="$($p.ResponseTime)ms"}
-$Docker=if(Get-Process -ErrorAction SilentlyContinue|Where-Object ProcessName -match 'docker'){'RUNNING'}else{'STOPPED'}
-$PiApp=if(Get-Process -ErrorAction SilentlyContinue|Where-Object ProcessName -match 'Pi Network'){'RUNNING'}else{'STOPPED'}
-
-$PortOpen=$false
-foreach($pt in 31401,31402,31403){
- try{if((Test-NetConnection 127.0.0.1 -Port $pt -WarningAction SilentlyContinue).TcpTestSucceeded){$PortOpen=$true;break}}catch{}
-}
-$PortStatus=if($PortOpen){'OPEN'}else{'CLOSED'}
-
-$stamp=$Now.ToString('yyyyMMdd_HHmmss')
-$Img=Join-Path $HISTORY_DIR "Pi_$stamp.png"
-$WindowFound=$false;$CaptureOK=$false;$CaptureMode='none';$CaptureSource='none';$AI=$null;$PrevWin=[IntPtr]::Zero
-
-try{
- $PrevWin=[PiWin]::GetForegroundWindow()
- $allWin=[PiWin]::FindAll($WINDOW_KEYWORDS)
- $hwnd=[IntPtr]::Zero
- $CaptureSource='none'
-
- if($allWin -and $allWin.Count -gt 0){
-  $WindowFound=$true
-  Write-Log ("Tim thay $($allWin.Count) cua so: " + (($allWin | ForEach-Object { [PiWin]::Title($_) }) -join ' | '))
-
-  # --- Uu tien 1: PiCheck ---
-  $hwndPiCheck=[PiWin]::FindPreferred($WINDOW_KEYWORDS,'PiCheck')
-  # --- Uu tien 2: Pi Desktop / Pi Network ---
-  $hwndDesktop=[IntPtr]::Zero
-  foreach($h in $allWin){
-   $t=[PiWin]::Title($h)
-   if($t -match '(?i)pi\s*desktop'){ $hwndDesktop=$h; break }
-  }
-  if($hwndDesktop -eq [IntPtr]::Zero){
-   foreach($h in $allWin){
-    $t=[PiWin]::Title($h)
-    if($t -match '(?i)pi\s*network' -and $t -notmatch '(?i)picheck'){ $hwndDesktop=$h; break }
-   }
-  }
-
-  # Dua cac cua so lien quan len (Desktop truoc, PiCheck sau = PiCheck o tren cung neu co)
-  if($hwndDesktop -ne [IntPtr]::Zero){
-   Write-Log "ForceFocus Desktop: $([PiWin]::Title($hwndDesktop))"
-   [PiWin]::ForceFocus($hwndDesktop)
-   Start-Sleep -Milliseconds 350
-  }
-  if($hwndPiCheck -ne [IntPtr]::Zero){
-   Write-Log "ForceFocus PiCheck: $([PiWin]::Title($hwndPiCheck))"
-   [PiWin]::ForceFocus($hwndPiCheck)
-   Start-Sleep -Milliseconds 500
-  }
-
-  # Chup: uu tien PiCheck, khong co thi Pi Desktop
-  if($hwndPiCheck -ne [IntPtr]::Zero){
-   $hwnd=$hwndPiCheck
-   $CaptureSource='PiCheck'
-  } elseif($hwndDesktop -ne [IntPtr]::Zero){
-   $hwnd=$hwndDesktop
-   $CaptureSource='PiDesktop'
-   Write-Log 'Khong co PiCheck - dung Pi Desktop'
-  } else {
-   $hwnd=$allWin[0]
-   $CaptureSource='OtherPi'
-   Write-Log "Khong co PiCheck/Desktop - dung: $([PiWin]::Title($hwnd))"
-  }
-
-  [PiWin]::ForceFocus($hwnd)
-  Start-Sleep -Milliseconds 700
-  Write-Log "Chup nguon=$CaptureSource title=$([PiWin]::Title($hwnd))"
-  if([PiWin]::Capture($hwnd,$Img)){ $CaptureOK=$true; $CaptureMode="window:$CaptureSource" }
- } else {
-  Write-Log 'Khong tim thay cua so PiCheck / Pi Desktop / Pi Network'
- }
-
- if(-not $CaptureOK -and (Capture-FullScreen $Img)){
-  $CaptureOK=$true
-  $CaptureMode='fullscreen'
-  $CaptureSource='FullScreen'
-  Write-Log 'Fallback: chup full man hinh'
- }
-
- if($CaptureOK){
-  $AI=Invoke-GeminiVision -ImagePath $Img -SourceHint $CaptureSource
- }
-}catch{Write-Log "Capture loi: $($_.Exception.Message)"}
-finally{if($PrevWin -ne [IntPtr]::Zero){try{[PiWin]::SetForegroundWindow($PrevWin)|Out-Null}catch{}}}
-
-$Local='N/A';$Latest='N/A';$Out='N/A';$In='N/A';$Temp='N/A';$Sync='N/A';$AINet='N/A';$AIChain='N/A';$Avail='N/A';$AiCpu='N/A';$PiCheckInImage=$null
-if($AI){
- if($null-ne$AI.picheck_found){$PiCheckInImage=[bool]$AI.picheck_found}
- foreach($pair in @(
-  @('sync_state','Sync'),@('outgoing','Out'),@('incoming','In'),@('local_block','Local'),
-  @('latest_block','Latest'),@('internet','AINet'),@('blockchain_control','AIChain'),
-  @('cpu_temp','Temp'),@('availability','Avail'),@('cpu_percent','AiCpu')
- )){
-  $prop=$pair[0];$var=$pair[1]
-  $val=$AI.$prop
-  if($null -ne $val -and "$val" -ne '' -and "$val" -ne 'N/A'){
-    Set-Variable -Name $var -Value "$val"
-  }
- }
- # Neu AI doc duoc CPU% ma he thong WMI lech, uu tien AI cho nhiet do (Temp da map)
- Write-Log "AI map: Sync=$Sync Out=$Out In=$In Local=$Local Latest=$Latest Temp=$Temp Avail=$Avail Net=$AINet Chain=$AIChain"
-}
-$SyncStatus='Chua ro'
-if($Local-ne'N/A'-and$Latest-ne'N/A'){try{$SyncStatus=if([double]$Local-eq[double]$Latest){'Dong bo tot'}else{'Lech khoi'}}catch{$SyncStatus=$Sync}}
-elseif($Sync-match'Synced'){$SyncStatus='Dong bo tot'}
-elseif($Sync-match'Syncing'){$SyncStatus='Dang dong bo'}
-elseif($Sync-match'Not'){$SyncStatus='Chua dong bo'}
-
-
-# --- Nhiệt độ hệ thống dự phòng (không phụ thuộc PiCheck) ---
-function Get-SystemTemperatureC {
-  $candidates = @()
-  # 1) WMI ACPI thermal zone (nếu driver hỗ trợ)
-  try {
-    $zones = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue
-    foreach ($z in @($zones)) {
-      try {
-        $k = [double]$z.CurrentTemperature
-        if ($k -gt 0) {
-          $c = [math]::Round(($k / 10.0) - 273.15, 1)
-          if ($c -ge 20 -and $c -le 120) { $candidates += $c }
-        }
-      } catch {}
-    }
-  } catch {}
-  # 2) LibreHardwareMonitor / OpenHardwareMonitor WMI nếu có
-  foreach ($ns in @('root/LibreHardwareMonitor','root/OpenHardwareMonitor')) {
+    param([array]$Records)
     try {
-      $sensors = Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction SilentlyContinue |
-        Where-Object { $_.SensorType -eq 'Temperature' -and $_.Name -match 'CPU|Package|Tctl|Core' }
-      foreach ($s in @($sensors)) {
-        try {
-          $c = [math]::Round([double]$s.Value, 1)
-          if ($c -ge 20 -and $c -le 120) { $candidates += $c }
-        } catch {}
-      }
+        $max = [math]::Max(100, $HISTORY_MAX)
+        if ($Records.Count -gt $max) { $Records = @($Records | Select-Object -Last $max) }
+        ($Records | ConvertTo-Json -Depth 12 -Compress) | Set-Content -LiteralPath $DATA_FILE -Encoding UTF8
+    } catch {
+        Write-Log "Save history loi: $($_.Exception.Message)"
+    }
+}
+
+function Read-CollectorState {
+    $defaults = [ordered]@{
+        lastDiskSample = $null
+        lastDisk = $null
+        lastAlertKey = ''
+        lastAlertAt = $null
+        alertCountToday = 0
+        alertDay = ''
+    }
+    if (!(Test-Path -LiteralPath $COLLECTOR_STATE)) { return $defaults }
+    try {
+        $raw = Get-Content -LiteralPath $COLLECTOR_STATE -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($k in @($defaults.Keys)) {
+            if ($null -ne $raw.PSObject.Properties[$k]) { $defaults[$k] = $raw.$k }
+        }
+        return $defaults
+    } catch { return $defaults }
+}
+
+function Save-CollectorState {
+    param($State)
+    try {
+        ($State | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $COLLECTOR_STATE -Encoding UTF8
     } catch {}
-  }
-  # 3) Core Temp - đọc log/file nếu có
-  try {
-    $ctPaths = @(
-      (Join-Path $env:ProgramFiles 'Core Temp\coretemp.cmd'),
-      (Join-Path ${env:ProgramFiles(x86)} 'Core Temp\coretemp.cmd')
+}
+
+function Invoke-External {
+    param(
+        [string]$File,
+        [string[]]$Args,
+        [int]$TimeoutMs = 8000
     )
-    # Shared memory không dễ từ PS; thử file log trong AppData
-    $log = Join-Path $env:APPDATA 'Core Temp\CT_Status.txt'
-    if (Test-Path -LiteralPath $log) {
-      $line = Get-Content -LiteralPath $log -Tail 5 -ErrorAction SilentlyContinue | Where-Object { $_ -match '(\d+(?:\.\d+)?)\s*°?\s*C' } | Select-Object -Last 1
-      if ($line -match '(\d+(?:\.\d+)?)') {
-        $c = [math]::Round([double]$Matches[1], 1)
-        if ($c -ge 20 -and $c -le 120) { $candidates += $c }
-      }
-    }
-  } catch {}
-  # 4) Performance counter "Thermal Zone Information" (một số máy)
-  try {
-    $pc = Get-Counter '\Thermal Zone Information(*)\Temperature' -ErrorAction SilentlyContinue
-    foreach ($s in @($pc.CounterSamples)) {
-      try {
-        $k = [double]$s.CookedValue
-        $c = [math]::Round($k - 273.15, 1)
-        if ($c -ge 20 -and $c -le 120) { $candidates += $c }
-      } catch {}
-    }
-  } catch {}
-
-  if ($candidates.Count -eq 0) { return $null }
-  # Lấy trung bình các mẫu hợp lệ (ổn định hơn max)
-  return [math]::Round((($candidates | Measure-Object -Average).Average), 1)
-}
-
-# Nếu AI/PiCheck không có nhiệt độ hợp lệ → fallback hệ thống
-try {
-  $tempOk = $false
-  if ($Temp -ne 'N/A' -and "$Temp" -ne '' -and "$Temp" -ne '0') {
     try {
-      $td = [double]$Temp
-      if ($td -ge 20 -and $td -le 120) { $tempOk = $true } else { $Temp = 'N/A' }
-    } catch { $Temp = 'N/A' }
-  }
-  if (-not $tempOk) {
-    $sysT = Get-SystemTemperatureC
-    if ($null -ne $sysT) {
-      $Temp = "$sysT"
-      Write-Log "Nhiet do fallback he thong: $Temp C (khong phu thuoc PiCheck)"
-    } else {
-      Write-Log "Khong lay duoc nhiet do tu AI/PiCheck/he thong"
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $File
+        $psi.Arguments = ($Args | ForEach-Object {
+            if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+        }) -join ' '
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $p = New-Object System.Diagnostics.Process
+        $p.StartInfo = $psi
+        [void]$p.Start()
+        if (-not $p.WaitForExit($TimeoutMs)) {
+            try { $p.Kill() } catch {}
+            return $null
+        }
+        return $p.StandardOutput.ReadToEnd()
+    } catch { return $null }
+}
+
+function Get-DockerLive {
+    $docker = $null
+    try { $docker = (Get-Command docker -ErrorAction SilentlyContinue).Source } catch {}
+    if (-not $docker) {
+        return [ordered]@{ available = $false; engine = 'STOPPED'; pi_container = $null; containers = @(); info = $null; pi_stats = $null }
     }
-  }
-} catch { Write-Log "Temp fallback loi: $($_.Exception.Message)" }
-
-# SoftIssues: thieu UI/AI - khong tinh la su co Node, khong canh bao Telegram
-# Warnings: tai nguyen cao - theo doi, khong tu reset
-# Critical: port/docker/sync/internet - canh bao + co the reset
-$SoftIssues=@()
-$Warnings=@()
-$Critical=@()
-
-if($WindowFound -and $CaptureSource -eq 'PiDesktop'){ Write-Log 'Nguon: Pi Desktop (khong thay PiCheck - van chap nhan)' }
-if($WindowFound -and $CaptureSource -eq 'PiCheck'){ Write-Log 'Nguon chinh: PiCheck' }
-if(!$WindowFound){ $SoftIssues+='Khong tim thay cua so PiCheck/Pi Desktop (van kiem tra Docker/port/he thong)' }
-if(!$CaptureOK){ $SoftIssues+='Khong chup duoc man hinh (bo qua OCR)' }
-if($CaptureOK -and !$AI){
-  if([string]::IsNullOrWhiteSpace($GEMINI_API_KEY) -or $GEMINI_API_KEY -eq 'PUT_GEMINI_API_KEY_HERE'){
-    $SoftIssues+='Thieu GeminiApiKey - khong OCR duoc cua so'
-  } else {
-    $SoftIssues+='AI khong doc duoc du lieu tu anh'
-  }
-}
-if($AI -and $PiCheckInImage -eq $false -and $CaptureSource -eq 'PiDesktop'){
-  $SoftIssues+='Dang doc tu Pi Desktop thay vi PiCheck'
-}
-if($Local -eq 'N/A' -and $Latest -eq 'N/A' -and $Out -eq 'N/A' -and $In -eq 'N/A' -and $AI){
-  $SoftIssues+='Khong doc duoc thong so block/peer tu anh'
-}
-
-# Warnings (tai nguyen)
-if($RAM -ge $RAM_ALERT){ $Warnings+="RAM cao: $RAM%" }
-if($CPU -ge $CPU_ALERT){ $Warnings+="CPU cao: $CPU%" }
-if($Temp -ne 'N/A'){
-  try { if([double]$Temp -ge $TEMP_ALERT){ $Warnings+="Nhiet do cao: $Temp C" } } catch {}
-}
-if($FreeGB -lt 20){ $Warnings+="O C thap: $FreeGB GB" }
-if($In -ne 'N/A'){
-  try { if([double]$In -le $INCOMING_LOW){ $Warnings+="Incoming thap: $In" } } catch {}
+    $info = Invoke-External $docker @('info', '--format', 'Server={{.ServerVersion}}|Containers={{.Containers}}|Running={{.ContainersRunning}}|Images={{.Images}}')
+    $ps = Invoke-External $docker @('ps', '--format', '{{.Names}}|{{.Image}}|{{.Status}}')
+    $containers = @()
+    if ($ps) {
+        foreach ($line in ($ps -split "`r?`n")) {
+            if ($line.Trim()) {
+                $x = $line -split '\|', 3
+                $containers += [pscustomobject]@{ name = $x[0]; image = $x[1]; status = $x[2] }
+            }
+        }
+    }
+    $testnet = $containers | Where-Object { $_.name -eq 'testnet2' -or $_.image -match 'pi-node-docker' } | Select-Object -First 1
+    $stats = $null
+    if ($testnet) {
+        $s = Invoke-External $docker @('stats', $testnet.name, '--no-stream', '--format', 'CPU={{.CPUPerc}}|RAM={{.MemUsage}}|RAMP={{.MemPerc}}|NET={{.NetIO}}|BLOCK={{.BlockIO}}|PIDS={{.PIDs}}')
+        if ($s) {
+            $stats = [ordered]@{}
+            foreach ($v in ($s.Trim() -split '\|')) {
+                $kv = $v -split '=', 2
+                if ($kv.Count -eq 2) { $stats[$kv[0]] = $kv[1] }
+            }
+        }
+    }
+    [ordered]@{
+        available    = $true
+        engine       = 'RUNNING'
+        info         = $info
+        containers   = $containers
+        pi_container = if ($testnet) { $testnet.name } else { $null }
+        pi_stats     = $stats
+    }
 }
 
-# Critical - su co Node thuc su
-if($PortStatus -eq 'CLOSED'){ $Critical+='Port Node dang dong' }
-if($Docker -eq 'STOPPED'){ $Critical+='Docker dang tat' }
-if($SyncStatus -in @('Lech khoi','Chua dong bo')){ $Critical+="Dong bo khoi: $SyncStatus ($Local / $Latest)" }
-if($AINet -eq 'ERROR'){ $Critical+='Internet (Node) bao ERROR' }
-if($AIChain -eq 'ERROR'){ $Critical+='Blockchain control bao ERROR' }
-if($Net -eq 'OFFLINE'){ $Critical+='May mat ket noi Internet' }
+function Get-PiCoreLive {
+    param([string]$Container)
+    if (-not $Container) { return [ordered]@{ available = $false } }
+    $docker = $null
+    try { $docker = (Get-Command docker -ErrorAction SilentlyContinue).Source } catch {}
+    if (-not $docker) { return [ordered]@{ available = $false } }
 
-# problems = so su co THUC (critical + warning nang). Soft khong dem.
+    $raw = Invoke-External $docker @('exec', $Container, 'stellar-core', 'http-command', 'info') 12000
+    if (-not $raw) { return [ordered]@{ available = $false } }
+    $i = $raw.IndexOf('{')
+    if ($i -lt 0) { return [ordered]@{ available = $false } }
+    try {
+        $j = $raw.Substring($i) | ConvertFrom-Json
+        $info = $j.info
+        $in = 0; $out = 0; $auth = 0; $pending = 0
+        $peersRaw = Invoke-External $docker @('exec', $Container, 'stellar-core', 'http-command', 'peers') 10000
+        if ($peersRaw) {
+            $pi = $peersRaw.IndexOf('{')
+            if ($pi -ge 0) {
+                try {
+                    $pj = $peersRaw.Substring($pi) | ConvertFrom-Json
+                    $in = @($pj.authenticated_peers.inbound).Count
+                    $out = @($pj.authenticated_peers.outbound).Count
+                    $auth = $in + $out
+                    $pending = @($pj.pending_peers).Count
+                } catch {}
+            }
+        }
+        [ordered]@{
+            available         = $true
+            network           = $info.network
+            state             = $info.state
+            synced            = ($info.state -eq 'Synced!')
+            build             = $info.build
+            protocol_version  = $info.protocol_version
+            started_on        = $info.startedOn
+            ledger = [ordered]@{
+                number     = $info.ledger.num
+                age        = $info.ledger.age
+                hash       = $info.ledger.hash
+                close_time = $info.ledger.closeTime
+            }
+            peers = [ordered]@{
+                incoming      = $in
+                outgoing      = $out
+                authenticated = $auth
+                pending       = $pending
+            }
+            quorum = [ordered]@{
+                phase         = $info.quorum.qset.phase
+                agree         = $info.quorum.qset.agree
+                disagree      = $info.quorum.qset.disagree
+                missing       = $info.quorum.qset.missing
+                lag_ms        = $info.quorum.qset.lag_ms
+                intersection  = $info.quorum.transitive.intersection
+                node_count    = $info.quorum.transitive.node_count
+            }
+        }
+    } catch {
+        Write-Log "PiCore parse loi: $($_.Exception.Message)"
+        return [ordered]@{ available = $false }
+    }
+}
+
+function Get-TemperatureLive {
+    if (-not (Test-Path -LiteralPath $DLL_PATH)) {
+        return [ordered]@{ available = $false; source = 'none'; package_c = $null; min_c = $null; max_c = $null }
+    }
+    try {
+        Unblock-File $DLL_PATH -ErrorAction SilentlyContinue
+        if (-not ('OpenHardwareMonitor.Hardware.Computer' -as [type])) {
+            Add-Type -Path $DLL_PATH
+        }
+        $c = [OpenHardwareMonitor.Hardware.Computer]::new()
+        $c.CPUEnabled = $true
+        $c.Open()
+        $cores = @()
+        $packages = @()
+        foreach ($h in @($c.Hardware | Where-Object { $_.HardwareType -eq 'CPU' })) {
+            $h.Update()
+            foreach ($s in @($h.Sensors | Where-Object { $_.SensorType -eq 'Temperature' -and $null -ne $_.Value })) {
+                $v = [math]::Round([double]$s.Value, 1)
+                if ($s.Name -match 'Package') { $packages += $v }
+                else { $cores += [pscustomobject]@{ sensor = $s.Name; temp_c = $v } }
+            }
+        }
+        $c.Close()
+        if ($packages.Count -gt 0) {
+            return [ordered]@{
+                available  = $true
+                source     = 'OpenHardwareMonitorLib'
+                package_c  = [math]::Round((($packages | Measure-Object -Average).Average), 1)
+                min_c      = if ($cores.Count) { [math]::Round((($cores.temp_c | Measure-Object -Minimum).Minimum), 1) } else { $null }
+                max_c      = if ($cores.Count) { [math]::Round((($cores.temp_c | Measure-Object -Maximum).Maximum), 1) } else { $null }
+                cores      = $cores
+            }
+        }
+        return [ordered]@{ available = $false; source = 'OpenHardwareMonitorLib'; package_c = $null; min_c = $null; max_c = $null }
+    } catch {
+        Write-Log "Temp loi: $($_.Exception.Message)"
+        return [ordered]@{ available = $false; source = 'OpenHardwareMonitorLib'; error = $_.Exception.Message; package_c = $null; min_c = $null; max_c = $null }
+    }
+}
+
+function Get-SystemLive {
+    param($CachedDisk)
+    $os = Get-CimInstance Win32_OperatingSystem
+    $cpu = @(Get-CimInstance Win32_Processor)
+    $cpuLoad = if ($cpu.Count) { [math]::Round((($cpu.LoadPercentage | Measure-Object -Average).Average), 1) } else { $null }
+    $ramTotal = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+    $ramFree = [math]::Round($os.FreePhysicalMemory / 1MB, 2)
+    $disks = $CachedDisk
+    if ($null -eq $disks) {
+        $disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object {
+            [pscustomobject]@{
+                name          = $_.DeviceID
+                total_gb      = [math]::Round($_.Size / 1GB, 2)
+                free_gb       = [math]::Round($_.FreeSpace / 1GB, 2)
+                used_gb       = [math]::Round(($_.Size - $_.FreeSpace) / 1GB, 2)
+                usage_percent = if ($_.Size -gt 0) { [math]::Round((1 - ($_.FreeSpace / $_.Size)) * 100, 1) } else { $null }
+            }
+        })
+    }
+    $net = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | ForEach-Object {
+        [pscustomobject]@{ name = $_.Name; description = $_.InterfaceDescription; speed = $_.LinkSpeed }
+    })
+    $ping = $null
+    try { $ping = (Test-Connection 1.1.1.1 -Count 1 -ErrorAction Stop).ResponseTime } catch {}
+    $ports = @(31401, 31402, 31403) | ForEach-Object {
+        $p = $_
+        $listen = @(Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue).Count -gt 0
+        [pscustomobject]@{ port = $p; listening = $listen }
+    }
+    $vmmem = Get-Process vmmem, vmmemWSL -ErrorAction SilentlyContinue | Select-Object -First 1
+    $piDesktop = $null
+    try {
+        $piDesktop = Get-Process | Where-Object { $_.ProcessName -match 'Pi|PiNetwork|PiNode' } | Select-Object -First 1
+    } catch {}
+    [ordered]@{
+        hostname = $env:COMPUTERNAME
+        os       = $os.Caption
+        uptime   = ((Get-Date) - $os.LastBootUpTime).ToString()
+        cpu = [ordered]@{
+            usage_percent     = $cpuLoad
+            sockets           = $cpu.Count
+            cores             = ($cpu | Measure-Object NumberOfCores -Sum).Sum
+            threads           = ($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum
+            frequency_mhz     = if ($cpu.Count) { [math]::Round((($cpu.CurrentClockSpeed | Measure-Object -Average).Average), 0) } else { $null }
+            max_frequency_mhz = if ($cpu.Count) { [math]::Round((($cpu.MaxClockSpeed | Measure-Object -Average).Average), 0) } else { $null }
+        }
+        ram = [ordered]@{
+            total_gb      = $ramTotal
+            free_gb       = $ramFree
+            used_gb       = [math]::Round($ramTotal - $ramFree, 2)
+            usage_percent = if ($ramTotal -gt 0) { [math]::Round((1 - $ramFree / $ramTotal) * 100, 1) } else { $null }
+        }
+        disk              = $disks
+        network           = [ordered]@{ adapters = $net; latency_ms = $ping }
+        ports             = $ports
+        vmmem_gb          = if ($vmmem) { [math]::Round($vmmem.WorkingSet64 / 1GB, 2) } else { $null }
+        pi_desktop_running = ($null -ne $piDesktop)
+    }
+}
+
+# ===================== MAIN =====================
+Write-Log '========== BAT DAU SmartMonitor v10 Live =========='
+$Now = Get-Date
+$cstate = Read-CollectorState
+
+# Disk: lấy thưa hơn
+$needDisk = $true
+$cachedDisk = $null
+if ($cstate.lastDiskSample -and $cstate.lastDisk) {
+    try {
+        $lastD = [datetime]$cstate.lastDiskSample
+        if (($Now - $lastD).TotalMinutes -lt $DISK_SAMPLE_MINUTES) {
+            $needDisk = $false
+            $cachedDisk = $cstate.lastDisk
+        }
+    } catch { $needDisk = $true }
+}
+
+$dock = Get-DockerLive
+$pi   = Get-PiCoreLive -Container $dock.pi_container
+$temp = Get-TemperatureLive
+$sys  = Get-SystemLive -CachedDisk $(if ($needDisk) { $null } else { $cachedDisk })
+
+if ($needDisk) {
+    $cstate.lastDiskSample = $Now.ToString('o')
+    $cstate.lastDisk = $sys.disk
+}
+
+# Map sang schema cũ (controller phụ thuộc) + mở rộng
+$SyncStatus = 'N/A'
+$Local = 'N/A'
+$Latest = 'N/A'
+$Out = 'N/A'
+$In = 'N/A'
+$TempVal = 'N/A'
+$RAM = if ($null -ne $sys.ram.usage_percent) { $sys.ram.usage_percent } else { 'N/A' }
+$CPU = if ($null -ne $sys.cpu.usage_percent) { $sys.cpu.usage_percent } else { 'N/A' }
+$Docker = if ($dock.available) { 'RUNNING' } else { 'STOPPED' }
+$PortStatus = 'CLOSED'
+$FreeGB = 'N/A'
+$Net = if ($null -ne $sys.network.latency_ms) { 'ONLINE' } else { 'OFFLINE' }
+$Ping = if ($null -ne $sys.network.latency_ms) { "$($sys.network.latency_ms) ms" } else { 'N/A' }
+$PiApp = if ($sys.pi_desktop_running) { 'RUNNING' } else { 'STOPPED' }
+$Uptime = $sys.uptime
+$LedgerAge = $null
+$QuorumPhase = $null
+$LagMs = $null
+$Evidence = @()
+
+if ($pi.available) {
+    $Evidence += 'stellar-core http-command info/peers'
+    if ($pi.synced) { $SyncStatus = 'Dong bo tot' }
+    elseif ($pi.state -match '(?i)sync') { $SyncStatus = 'Dang dong bo' }
+    else { $SyncStatus = 'Chua dong bo' }
+    if ($null -ne $pi.ledger.number) { $Local = [string]$pi.ledger.number; $Latest = [string]$pi.ledger.number }
+    if ($null -ne $pi.peers.outgoing) { $Out = [string]$pi.peers.outgoing }
+    if ($null -ne $pi.peers.incoming) { $In = [string]$pi.peers.incoming }
+    $LedgerAge = $pi.ledger.age
+    $QuorumPhase = $pi.quorum.phase
+    $LagMs = $pi.quorum.lag_ms
+} else {
+    $Evidence += 'pi_node.unavailable (khong doc duoc stellar-core)'
+}
+
+if ($temp.available -and $null -ne $temp.package_c) {
+    $TempVal = [string]$temp.package_c
+    $Evidence += "temp source=$($temp.source)"
+} else {
+    $Evidence += 'temp unavailable'
+}
+
+$portOpen = @($sys.ports | Where-Object { $_.listening }).Count
+$portTotal = @($sys.ports).Count
+if ($portOpen -ge 1) { $PortStatus = 'OPEN' } else { $PortStatus = 'CLOSED' }
+$Evidence += "ports listening=$portOpen/$portTotal"
+
+$cDrive = @($sys.disk | Where-Object { $_.name -eq 'C:' } | Select-Object -First 1)
+if ($cDrive) { $FreeGB = $cDrive.free_gb }
+
+$Critical = @()
+$Warnings = @()
+$SoftIssues = @()
+
+# Critical — chỉ khi có bằng chứng đo được
+if (-not $dock.available) {
+    $Critical += 'Docker engine khong kha dung (docker info that bai)'
+}
+if ($dock.available -and -not $dock.pi_container) {
+    $Critical += 'Khong tim thay container Pi Node (testnet2 / pi-node-docker)'
+}
+if ($pi.available -and -not $pi.synced) {
+    $Critical += "Node chua Synced (state=$($pi.state), ledger_age=$($pi.ledger.age))"
+}
+if ($pi.available -and $null -ne $pi.ledger.age -and [double]$pi.ledger.age -gt $LEDGER_AGE_MAX) {
+    $Critical += "Ledger age cao: $($pi.ledger.age)s (nguong ${LEDGER_AGE_MAX}s)"
+}
+if ($PortStatus -eq 'CLOSED') {
+    $Critical += 'Port Pi (31401-31403) khong LISTEN'
+}
+if ($Net -eq 'OFFLINE') {
+    $Critical += 'May mat ket noi Internet (ping 1.1.1.1 that bai)'
+}
+
+# Warnings — tài nguyên / peer
+if ($RAM -ne 'N/A' -and [double]$RAM -ge $RAM_ALERT) { $Warnings += "RAM cao: $RAM% (nguong $RAM_ALERT%)" }
+if ($CPU -ne 'N/A' -and [double]$CPU -ge $CPU_ALERT) { $Warnings += "CPU cao: $CPU% (nguong $CPU_ALERT%)" }
+if ($TempVal -ne 'N/A') {
+    try { if ([double]$TempVal -ge $TEMP_ALERT) { $Warnings += "Nhiet do cao: $TempVal C (nguong $TEMP_ALERT C)" } } catch {}
+}
+if ($FreeGB -ne 'N/A' -and [double]$FreeGB -lt $DISK_FREE_MIN) { $Warnings += "O C thap: $FreeGB GB (nguong ${DISK_FREE_MIN}GB)" }
+if ($In -ne 'N/A') {
+    try { if ([double]$In -le $INCOMING_LOW) { $Warnings += "Incoming thap: $In (nguong $INCOMING_LOW)" } } catch {}
+}
+if ($pi.available -and $null -ne $pi.peers.outgoing -and [int]$pi.peers.outgoing -eq 0 -and [int]$pi.peers.incoming -eq 0) {
+    $Warnings += 'Incoming+Outgoing = 0 (peer mat ket noi)'
+}
+# Xu hướng peer: so với mẫu trước (chỉ khi cả hai mẫu có số thật)
+$peerDropNote = $null
+try {
+    $prevHist = @(Load-History)
+    if ($prevHist.Count -gt 0 -and $In -ne 'N/A' -and $Out -ne 'N/A') {
+        $prev = $prevHist[-1]
+        $pIn = $null; $pOut = $null
+        try { $pIn = [double]$prev.incoming } catch {}
+        try { $pOut = [double]$prev.outgoing } catch {}
+        $cIn = [double]$In; $cOut = [double]$Out
+        if ($null -ne $pIn -and $null -ne $pOut) {
+            $sumPrev = $pIn + $pOut
+            $sumNow = $cIn + $cOut
+            if ($sumPrev -ge 4 -and $sumNow -lt ($sumPrev * 0.5)) {
+                $peerDropNote = "Peer sut giam bat thuong: In+Out $sumPrev -> $sumNow (mau truoc -> hien tai)"
+                $Warnings += $peerDropNote
+                $Evidence += $peerDropNote
+            } elseif ($sumPrev -eq 0 -and $sumNow -ge 2) {
+                $Evidence += "Peer dang phuc hoi: In+Out 0 -> $sumNow"
+            }
+        }
+    }
+} catch {}
+if (-not $sys.pi_desktop_running) {
+    $SoftIssues += 'Pi Desktop process khong thay chay (khong bat buoc neu Docker Node dang chay)'
+}
+if (-not $pi.available -and $dock.available) {
+    $SoftIssues += 'Co Docker nhung khong doc duoc stellar-core info'
+}
+
 $Problems = @($Critical + $Warnings)
 $ProblemCount = $Problems.Count
 $CriticalCount = $Critical.Count
-$Severity = if($CriticalCount -gt 0){ 'CRITICAL' } elseif($Warnings.Count -gt 0){ 'WARNING' } else { 'OK' }
+$Severity = if ($CriticalCount -gt 0) { 'CRITICAL' } elseif ($Warnings.Count -gt 0) { 'WARNING' } else { 'OK' }
 
-# Chi canh bao Telegram khi CRITICAL (hoac WARNING neu muon - mac dinh chi CRITICAL de tranh bao gia)
-# Controller/scheduler se doc problems + severity
-if($Critical.Count -gt 0){
- $list=($Critical|ForEach-Object{"- $_"})-join "`n"
- $warnExtra = if($Warnings.Count){ "`nCanh bao phu:`n"+(($Warnings|ForEach-Object{"- $_"})-join "`n") } else { '' }
- $msg=@"
+# Cảnh báo Telegram: chỉ CRITICAL, chống spam (cùng key trong 30 phút)
+$alertKey = ($Critical -join '|')
+$today = $Now.ToString('yyyy-MM-dd')
+if ($cstate.alertDay -ne $today) {
+    $cstate.alertDay = $today
+    $cstate.alertCountToday = 0
+}
+$canAlert = $true
+if ($cstate.lastAlertKey -eq $alertKey -and $cstate.lastAlertAt) {
+    try {
+        if ((($Now) - [datetime]$cstate.lastAlertAt).TotalMinutes -lt 30) { $canAlert = $false }
+    } catch {}
+}
+if ($Critical.Count -gt 0 -and $canAlert) {
+    $list = ($Critical | ForEach-Object { "- $_" }) -join "`n"
+    $warnExtra = if ($Warnings.Count) { "`nCanh bao phu:`n" + (($Warnings | ForEach-Object { "- $_" }) -join "`n") } else { '' }
+    $ev = ($Evidence | Select-Object -First 6) -join '; '
+    $msg = @"
 CANH BAO PI NODE (CRITICAL)
-Luc $(Get-Date -Format 'HH:mm') ngay $(Get-Date -Format 'dd/MM')
+Luc $($Now.ToString('HH:mm')) ngay $($Now.ToString('dd/MM'))
 
-Su co thuc su:
+Su co (co bang chung do duoc):
 $list$warnExtra
 
-Thong so:
-- RAM: $RAM% | CPU: $CPU% | Nhiet do: $Temp C
-- Dong bo: $SyncStatus
+Thong so do:
+- Dong bo: $SyncStatus | Ledger: $Local | Age: $LedgerAge
 - Incoming / Outgoing: $In / $Out
-- Port: $PortStatus | Docker: $Docker
-- Nguon du lieu: $CaptureSource
-"@
- if($MonitorSelfNotify){ Send-Telegram $msg.Trim() }
- Write-Log "CRITICAL: $($Critical -join '; ')"
-} elseif($Warnings.Count -gt 0) {
- Write-Log "WARNING (khong spam Telegram): $($Warnings -join '; ')"
-} else {
- Write-Log "OK: khong su co critical/warning"
-}
-if($SoftIssues.Count){ Write-Log "SoftIssues: $($SoftIssues -join '; ')" }
+- RAM: $RAM% | CPU: $CPU% | Nhiet: $TempVal C
+- Port: $PortStatus | Docker: $Docker | Pi Desktop: $PiApp
+- Nguon: stellar-core + Docker + OHM (khong OCR)
 
+Bang chung: $ev
+"@
+    if ($MonitorSelfNotify) { Send-Telegram $msg.Trim() }
+    $cstate.lastAlertKey = $alertKey
+    $cstate.lastAlertAt = $Now.ToString('o')
+    $cstate.alertCountToday = [int]$cstate.alertCountToday + 1
+    Write-Log "CRITICAL: $($Critical -join '; ')"
+} elseif ($Warnings.Count -gt 0) {
+    Write-Log "WARNING (khong spam Telegram): $($Warnings -join '; ')"
+} else {
+    Write-Log 'OK: khong su co critical/warning'
+}
+if ($SoftIssues.Count) { Write-Log "SoftIssues: $($SoftIssues -join '; ')" }
+
+Save-CollectorState $cstate
+
+$History = @(Load-History)
 $History += [ordered]@{
- time=$Now.ToString('o');sync=$SyncStatus;local=$Local;latest=$Latest
- outgoing=$Out;incoming=$In;temp=$Temp;ram_sys=$RAM;cpu_sys=$CPU
- internet=$AINet;blockchain=$AIChain;avail=$Avail;docker=$Docker
- port=$PortStatus;capture=$CaptureMode;window=$WindowFound
- problems=$ProblemCount; critical=$CriticalCount; severity=$Severity
- source=$CaptureSource
+    time       = $Now.ToString('o')
+    sync       = $SyncStatus
+    local      = $Local
+    latest     = $Latest
+    outgoing   = $Out
+    incoming   = $In
+    temp       = $TempVal
+    ram_sys    = $RAM
+    cpu_sys    = $CPU
+    internet   = $Net
+    blockchain = if ($pi.available) { 'OK' } else { 'N/A' }
+    avail      = if ($pi.available -and $pi.synced) { 'OK' } else { 'N/A' }
+    docker     = $Docker
+    port       = $PortStatus
+    capture    = 'live-api'
+    window     = $false
+    problems   = $ProblemCount
+    critical   = $CriticalCount
+    severity   = $Severity
+    source     = 'stellar-core+docker+ohm'
+    # extended (controller co the bo qua neu chua biet)
+    ledger_age     = $LedgerAge
+    quorum_phase   = $QuorumPhase
+    quorum_lag_ms  = $LagMs
+    pi_container   = $dock.pi_container
+    free_gb        = $FreeGB
+    pi_desktop     = $PiApp
+    evidence       = $Evidence
+    critical_list  = $Critical
+    warning_list   = $Warnings
+    peers_auth     = if ($pi.available) { $pi.peers.authenticated } else { $null }
+    protocol       = if ($pi.available) { $pi.protocol_version } else { $null }
+    build          = if ($pi.available) { $pi.build } else { $null }
 }
 Save-History $History
 
-if($Hour-eq7-or$Hour-eq18){
- $since=$Now.AddHours(-24)
- $Day=@($History|Where-Object{try{[datetime]$_.time-ge$since}catch{$false}})
- $TotalRuns=$Day.Count;$ProblemRuns=@($Day|Where-Object{$_.problems-gt 0}).Count
- $temps=@($Day|Where-Object{$_.temp-ne'N/A'}|ForEach-Object{try{[double]$_.temp}catch{}})
- $maxT=if($temps.Count){($temps|Measure-Object -Maximum).Maximum}else{'N/A'}
- $avgT=if($temps.Count){[math]::Round(($temps|Measure-Object -Average).Average,1)}else{'N/A'}
- $ins=@($Day|Where-Object{$_.incoming-ne'N/A'}|ForEach-Object{try{[double]$_.incoming}catch{}})
- $avgIn=if($ins.Count){[math]::Round(($ins|Measure-Object -Average).Average,1)}else{'N/A'}
- $syncOK=@($Day|Where-Object{$_.sync-eq'Dong bo tot'}).Count
- $syncRate=if($TotalRuns){[math]::Round(100*$syncOK/$TotalRuns,0)}else{0}
- if($ProblemRuns-ge3-or$syncRate-lt70){$overall='Can chu y';$mood='Co vai diem can theo doi.'}
- elseif($ProblemRuns-eq0-and$syncRate-ge90){$overall='Tot';$mood='Node dang chay on dinh.'}
- else{$overall='On dinh';$mood='Tinh trang chung o muc chap nhan duoc.'}
- $report=@"
+# Bao cao 7h/18h neu MonitorSelfNotify
+$Hour = [int]$Now.Hour
+$IsReportHour = ($Hour -eq 7 -or $Hour -eq 18)
+if ($IsReportHour -and $MonitorSelfNotify) {
+    $since = $Now.AddHours(-24)
+    $Day = @($History | Where-Object { try { [datetime]$_.time -ge $since } catch { $false } })
+    $TotalRuns = $Day.Count
+    $ProblemRuns = @($Day | Where-Object { $_.problems -gt 0 }).Count
+    $temps = @($Day | Where-Object { $_.temp -ne 'N/A' } | ForEach-Object { try { [double]$_.temp } catch {} })
+    $maxT = if ($temps.Count) { ($temps | Measure-Object -Maximum).Maximum } else { 'N/A' }
+    $avgT = if ($temps.Count) { [math]::Round(($temps | Measure-Object -Average).Average, 1) } else { 'N/A' }
+    $ins = @($Day | Where-Object { $_.incoming -ne 'N/A' } | ForEach-Object { try { [double]$_.incoming } catch {} })
+    $avgIn = if ($ins.Count) { [math]::Round(($ins | Measure-Object -Average).Average, 1) } else { 'N/A' }
+    $syncOK = @($Day | Where-Object { $_.sync -eq 'Dong bo tot' }).Count
+    $syncRate = if ($TotalRuns) { [math]::Round(100 * $syncOK / $TotalRuns, 0) } else { 0 }
+    if ($ProblemRuns -ge 3 -or $syncRate -lt 70) { $overall = 'Can chu y'; $mood = 'Co vai diem can theo doi.' }
+    elseif ($ProblemRuns -eq 0 -and $syncRate -ge 90) { $overall = 'Tot'; $mood = 'Node dang chay on dinh.' }
+    else { $overall = 'On dinh'; $mood = 'Tinh trang chung o muc chap nhan duoc.' }
+    $report = @"
 BAO CAO PI NODE
-$(Get-Date -Format 'dd/MM/yyyy HH:mm')
+$($Now.ToString('dd/MM/yyyy HH:mm'))
 
 Tong quan: $overall
 $mood
 
-Hien tai:
+Hien tai (do truc tiep stellar-core):
 Dong bo: $SyncStatus
-Local/Latest: $Local / $Latest
+Ledger: $Local | Age: $LedgerAge
 Incoming/Outgoing: $In / $Out
-Nhiet do: $Temp C
+Nhiet do: $TempVal C
 RAM/CPU: $RAM% / $CPU%
-Availability: $Avail
-Internet: $AINet
-Blockchain: $AIChain
 
 24 gio:
 So lan kiem tra: $TotalRuns
@@ -713,16 +626,12 @@ Port: $PortStatus
 Uptime: $Uptime
 Mang: $Net ($Ping)
 
-$(if($Problems.Count){"Van de luc nay:`n"+(($Problems|ForEach-Object{"- $_"})-join "`n")}else{'Hien tai khong phat hien su co.'})
+$(if ($Problems.Count) { "Van de luc nay:`n" + (($Problems | ForEach-Object { "- $_" }) -join "`n") } else { 'Hien tai khong phat hien su co.' })
 
-Smart Monitor v9.0 Portable
+Smart Monitor v10 Live (khong OCR)
 "@
- if ($MonitorSelfNotify -and $IsReportHour) { Send-Telegram $report.Trim() }
+    Send-Telegram $report.Trim()
 }
 
-Get-ChildItem $HISTORY_DIR -File -ErrorAction SilentlyContinue|
- Where-Object{$_.LastWriteTime-lt$Now.AddDays(-20)}|
- Remove-Item -Force -ErrorAction SilentlyContinue
-
-Write-Log "Ket qua: Window=$WindowFound Capture=$CaptureMode Sync=$SyncStatus Severity=$Severity Critical=$CriticalCount Warn=$($Warnings.Count) Soft=$($SoftIssues.Count) Temp=$Temp"
+Write-Log "Ket qua: Sync=$SyncStatus Severity=$Severity Critical=$CriticalCount Warn=$($Warnings.Count) Soft=$($SoftIssues.Count) Temp=$TempVal In=$In Out=$Out Age=$LedgerAge Source=live-api"
 Write-Log '========== KET THUC =========='
