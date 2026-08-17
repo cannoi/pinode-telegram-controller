@@ -1,0 +1,43 @@
+name: PowerShell Syntax Check
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  powershell-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PowerShell
+        uses: PowerShell/PowerShell@v1
+
+      - name: Parse PowerShell files
+        shell: pwsh
+        run: |
+          $errors = @()
+          Get-ChildItem -Recurse -Filter *.ps1 |
+            Where-Object { $_.FullName -notmatch '[\\/](Logs|State)[\\/]' } |
+            ForEach-Object {
+              $tokens = $null
+              $parseErrors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName,
+                [ref]$tokens,
+                [ref]$parseErrors
+              ) | Out-Null
+              if ($parseErrors.Count -gt 0) {
+                $errors += "$($_.FullName): $($parseErrors -join '; ')"
+              }
+            }
+
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
+
+          Write-Host "PowerShell syntax check passed."
