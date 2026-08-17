@@ -228,6 +228,135 @@ function Add-ChatTurn {
     }
 }
 
+# ===== User habits / keyword fast-path (bỏ qua AI khi đã quen lệnh) =====
+$script:HabitsFile = if ($DataDir) { Join-Path $DataDir 'user_habits.json' } else { Join-Path $AppRoot 'Data\user_habits.json' }
+
+function Get-DefaultHabits {
+    return [ordered]@{
+        version = 1
+        keywords = @()
+        corrections = @()
+        last_updated = $null
+    }
+}
+
+function Read-UserHabits {
+    $defaults = Get-DefaultHabits
+    if (!(Test-Path -LiteralPath $script:HabitsFile)) { return $defaults }
+    try {
+        $raw = Get-Content -LiteralPath $script:HabitsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $o = [ordered]@{
+            version = 1
+            keywords = @()
+            corrections = @()
+            last_updated = $null
+        }
+        if ($raw.keywords) { $o.keywords = @($raw.keywords) }
+        if ($raw.corrections) { $o.corrections = @($raw.corrections) }
+        if ($raw.last_updated) { $o.last_updated = $raw.last_updated }
+        return $o
+    } catch {
+        Write-Log "Read habits loi: $($_.Exception.Message)"
+        return $defaults
+    }
+}
+
+function Save-UserHabits {
+    param($Habits)
+    try {
+        $dir = Split-Path -Parent $script:HabitsFile
+        if ($dir -and !(Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $Habits.last_updated = (Get-Date).ToString('o')
+        # Giữ tối đa 200 keyword + 100 correction
+        if ($Habits.keywords.Count -gt 200) { $Habits.keywords = @($Habits.keywords | Sort-Object { [int]$_.hits } -Descending | Select-Object -First 200) }
+        if ($Habits.corrections.Count -gt 100) { $Habits.corrections = @($Habits.corrections | Select-Object -Last 100) }
+        ($Habits | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $script:HabitsFile -Encoding UTF8
+    } catch {
+        Write-Log "Save habits loi: $($_.Exception.Message)"
+    }
+}
+
+function Normalize-HabitKey {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    $t = $Text.ToLowerInvariant().Trim()
+    $t = $t -replace '\s+', ' '
+    if ($t.Length -gt 120) { $t = $t.Substring(0, 120) }
+    return $t
+}
+
+function Resolve-HabitIntent {
+    param([string]$Question)
+    $key = Normalize-HabitKey $Question
+    if ([string]::IsNullOrWhiteSpace($key)) { return $null }
+    $h = Read-UserHabits
+    # 1) Exact keyword match với hits >= 2
+    $exact = @($h.keywords | Where-Object { $_.key -eq $key -and [int]$_.hits -ge 2 } | Sort-Object { [int]$_.hits } -Descending | Select-Object -First 1)
+    if ($exact) { return [string]$exact[0].intent }
+    # 2) Contains match (key ngắn nằm trong câu hỏi) hits >= 3
+    $contains = @($h.keywords | Where-Object {
+        $k = [string]$_.key
+        $k.Length -ge 6 -and $key.Contains($k) -and [int]$_.hits -ge 3
+    } | Sort-Object { [int]$_.hits } -Descending | Select-Object -First 1)
+    if ($contains) { return [string]$contains[0].intent }
+    return $null
+}
+
+function Record-HabitSuccess {
+    param(
+        [string]$Question,
+        [string]$Intent
+    )
+    if ([string]::IsNullOrWhiteSpace($Question) -or [string]::IsNullOrWhiteSpace($Intent)) { return }
+    if ($Intent -in @('UNKNOWN','NATURAL','')) { return }
+    $key = Normalize-HabitKey $Question
+    if ($key.Length -lt 3) { return }
+    try {
+        $h = Read-UserHabits
+        $found = $false
+        $newList = @()
+        foreach ($item in @($h.keywords)) {
+            if ([string]$item.key -eq $key) {
+                $hits = 1
+                try { $hits = [int]$item.hits + 1 } catch { $hits = 1 }
+                $newList += [pscustomobject]@{ key = $key; intent = $Intent; hits = $hits; last = (Get-Date).ToString('o') }
+                $found = $true
+            } else {
+                $newList += $item
+            }
+        }
+        if (-not $found) {
+            $newList += [pscustomobject]@{ key = $key; intent = $Intent; hits = 1; last = (Get-Date).ToString('o') }
+        }
+        $h.keywords = $newList
+        Save-UserHabits $h
+    } catch {
+        Write-Log "Record-HabitSuccess loi: $($_.Exception.Message)"
+    }
+}
+
+function Record-HabitCorrection {
+    param(
+        [string]$PreviousText,
+        [string]$CurrentText,
+        [string]$ResolvedIntent
+    )
+    # Khi user phải nói lại / làm rõ → lưu cặp (câu trước → intent đúng) để lần sau nhanh hơn
+    if ([string]::IsNullOrWhiteSpace($CurrentText) -or [string]::IsNullOrWhiteSpace($ResolvedIntent)) { return }
+    try {
+        $h = Read-UserHabits
+        $h.corrections = @($h.corrections) + @([pscustomobject]@{
+            prev = Normalize-HabitKey $PreviousText
+            text = Normalize-HabitKey $CurrentText
+            intent = $ResolvedIntent
+            time = (Get-Date).ToString('o')
+        })
+        # Học luôn keyword từ câu làm rõ
+        Record-HabitSuccess -Question $CurrentText -Intent $ResolvedIntent
+        Save-UserHabits $h
+    } catch {}
+}
+
 function Get-ChatHistoryContext {
     param([int]$Turns = 0)
     if ($Turns -le 0) { $Turns = $CHAT_HISTORY_CONTEXT_TURNS }
@@ -469,18 +598,38 @@ function Get-NodeStatus {
     $t += "──────────────`n"
     $t += "🕐 $time`n"
     $t += "$sI  Đồng bộ · $syncShow`n"
-    $t += "📦  Khối · $($x.local) / $($x.latest)`n"
+    $t += "📦  Ledger · $($x.local)"
+    if ($null -ne $x.ledger_age -and "$($x.ledger_age)" -ne '') { $t += " (age $($x.ledger_age)s)" }
+    $t += "`n"
+    $t += "🔗  Peer · In $($x.incoming) / Out $($x.outgoing)`n"
     $t += "🐳  Docker · $($x.docker) $dI`n"
     $t += "🔌  Cổng · $($x.port) $pI`n"
     $t += "🧠  RAM · $($x.ram_sys)%   ⚙️ CPU · $($x.cpu_sys)%`n"
     $t += "🌡️  Nhiệt độ · $temp°C"
-    if ($critical -gt 0) { $t += "`n🚨  Sự cố nghiêm trọng · $critical" }
-    elseif ($severity -eq 'WARNING' -and $problem -gt 0) { $t += "`n⚠️  Cảnh báo · $problem" }
+    if ($null -ne $x.quorum_phase -and "$($x.quorum_phase)" -ne '') { $t += "`n🗳️  Quorum · $($x.quorum_phase)" }
+    if ($critical -gt 0) {
+        $t += "`n🚨  Sự cố nghiêm trọng · $critical"
+        try {
+            if ($x.critical_list) {
+                $clist = @($x.critical_list)
+                foreach ($c in ($clist | Select-Object -First 5)) { $t += "`n   • $c" }
+            }
+        } catch {}
+    }
+    elseif ($severity -eq 'WARNING' -and $problem -gt 0) {
+        $t += "`n⚠️  Cảnh báo · $problem"
+        try {
+            if ($x.warning_list) {
+                foreach ($w in (@($x.warning_list) | Select-Object -First 4)) { $t += "`n   • $w" }
+            }
+        } catch {}
+    }
     $t += "`n──────────────`n"
     $t += "💬 $insight"
     if ($prefs.showTips -and -not $good -and $critical -eq 0) {
         $t += "`n👉 Gợi ý: /diagnostic nếu muốn phân tích sâu hơn."
     }
+    if ($x.source) { $t += "`n📡 Nguồn: $($x.source)" }
     return $t
 }
 
@@ -896,15 +1045,25 @@ PI NODE TELEGRAM CONTROLLER PRO - KIEN THUC HE THONG
 
 MUC DICH UNG DUNG:
 - Bo dieu khien va giam sat Pi Node tren Windows qua Telegram.
-- Theo doi Pi Node/PiCheck, Docker, CPU, RAM, o C:, log, scheduler va lich su node.
+- Theo doi Pi Node (stellar-core), Docker, CPU, RAM, o dia, port, nhiet do, peer, ledger, scheduler va lich su node.
 - Cho phep dieu khien tu xa cac tac vu an toan va cac tac vu nguy hiem co xac nhan.
 - Gemini la lop AI hieu ngon ngu tu nhien; khong tu y chay PowerShell. Controller moi la thanh phan thuc thi.
 - Hermes la kenh AI truc tiep cho /ask. Gemini Natural Language duoc dung de hieu tin nhan tu nhien va tra loi cac cau hoi ve app.
+- MOI canh bao/phan tich PHAI dua tren so lieu do duoc (node_history). Cam suy doan, cam bia so.
+- Thong bao loi phai: van de + rui ro + so do + goi y lenh.
+- Thoi quen lenh (user_habits.json): hoc cum tu -> intent, lan sau tra loi nhanh khong can Gemini.
+- Peer In+Out = 0 hoac sut >50% so voi mau truoc = tin hieu som Node co van de.
+
+NGUON DU LIEU:
+- Smart Monitor v10 doc TRUC TIEP stellar-core (docker exec info/peers), Docker, Win32, port 31401-31403, OpenHardwareMonitorLib.
+- KHONG dung OCR/chup man hinh de lay thong so Node.
+- Quet mac dinh 5 phut; khi loi quet day 1 phut (toi da 10 lan). Auto-reset toi da 1 lan/ngay.
 
 CAU TRUC:
 - Config/PiNode_Config.ps1: cau hinh Telegram BotToken, ChatId, GeminiApiKey, danh sach model Gemini, Hermes container, timeout, nguong canh bao, lich scheduler va duong dan module.
 - Controller/PiNode_Telegram_Controller_PRO_v2.0.ps1: bo nao trung tam; nhan Telegram, dieu phoi lenh, scheduler, log, goi module, gui text/photo.
-- Data/PiNode_SmartMonitor_v9_CentralConfig.ps1: monitor Pi Node; doc thong tin tu cua so PiCheck, OCR/AI, kiem tra CPU/RAM/nhiet do/sync/ledger/port theo logic cua script va ghi history.
+- Data/PiNode_SmartMonitor_v9_CentralConfig.ps1: monitor live (stellar-core + Docker + OHM); ghi node_history.json.
+- Data/OpenHardwareMonitorLib.dll: cam bien nhiet (tuy chon).
 - Data/CleanRAM_PiNode.ps1: don RAM va rac he thong theo logic module; dung khi may nang.
 - Data/Weekly_Maintenance.ps1: bao tri dinh ky; cleanup he thong/Docker va cac tac vu toi uu theo script. /maintenance luon yeu cau /confirm khi nguoi dung goi thu cong.
 - Data/Diagnostic.ps1: chan doan nhanh cac van de cua Node/he thong.
@@ -920,7 +1079,7 @@ CAU TRUC:
 - Commands/commands.json: danh sach lenh chuan.
 - Logs/: controller.log va log hoat dong.
 - State/: PID, scheduler state, welcome flag va trang thai noi bo.
-- Data/node_history.json: du lieu lich su monitor neu Smart Monitor da tao.
+- Data/node_history.json: du lieu lich su monitor (toi da ~2500 mau).
 
 CAI DAT:
 1. Giai nen bo app vao thu muc co quyen ghi.
@@ -930,7 +1089,7 @@ CAI DAT:
 5. Chay Start_Controller.bat.
 6. Gui /help, /status va /monitor de kiem tra.
 7. Neu muon tu dong khi Windows khoi dong, dung Install_Controller_Task.bat.
-8. PiCheck/Pi Desktop can san sang de Smart Monitor doc man hinh neu monitor yeu cau.
+8. Can Docker + container Pi Node de monitor doc stellar-core. Nhiet do can OpenHardwareMonitorLib.dll trong Data/.
 
 LENH CHUAN:
 /help = menu huong dan
@@ -1480,26 +1639,38 @@ function Test-ReplyMatchesQuestion {
 function Invoke-NaturalLanguageMessage {
     param([string]$Question)
     if ([string]::IsNullOrWhiteSpace($Question)) { Send-Text (Show-Help); return }
-    # Fast visual acknowledgement prevents the user from thinking Telegram/Controller is frozen.
-    Send-Text "📩 Đã nhận yêu cầu`n`n📝 $Question`n`n🤖 Tôi đang xác định cách kiểm tra phù hợp...`n⏳ Vui lòng chờ kết quả."
-
-    # First ask Gemini. If its answer is not an exact supported intent, use the local
-    # deterministic resolver so the user never falls back to "không xác định" for
-    # common phrases.
-    $ai = Invoke-GeminiNaturalLanguage -Question $Question
-    $first = ''
-    $answer = $null
-    if (-not [string]::IsNullOrWhiteSpace($ai)) {
-        $lines = $ai -split "`r?`n",2
-        $first = $lines[0].Trim().ToUpperInvariant()
-        if ($first -eq 'KNOWLEDGE') {
-            $answer = if ($lines.Count -gt 1) { $lines[1].Trim() } else { '' }
-        }
-    }
 
     $allowed = @('STATUS','MONITOR','REPORT','STATISTICS','ADVICE','DOCKER','DISK','SCREENSHOT','LOGS','SCHEDULER','DIAGNOSTIC','CLEANRAM','MAINTENANCE_CONFIRM','RESET_CONFIRM','HELP','DONATE','ASK_HERMES','KNOWLEDGE')
-    if ($first -notin $allowed) {
-        $first = Get-NaturalLanguageFallbackIntent -Question $Question
+    $first = ''
+    $answer = $null
+    $fromHabit = $false
+
+    # 1) Habit / keyword fast-path — không gọi AI nếu đã học đủ
+    try {
+        $habitIntent = Resolve-HabitIntent -Question $Question
+        if ($habitIntent -and $habitIntent -in $allowed) {
+            $first = $habitIntent
+            $fromHabit = $true
+            Write-Log "Habit hit intent=$first q=$Question"
+        }
+    } catch {}
+
+    if ($fromHabit) {
+        Send-Text "📩 Đã nhận yêu cầu`n`n📝 $Question`n`n⚡ Nhận diện nhanh (thói quen) → $first"
+    } else {
+        Send-Text "📩 Đã nhận yêu cầu`n`n📝 $Question`n`n🤖 Tôi đang xác định cách kiểm tra phù hợp...`n⏳ Vui lòng chờ kết quả."
+        # 2) Gemini rồi fallback deterministic
+        $ai = Invoke-GeminiNaturalLanguage -Question $Question
+        if (-not [string]::IsNullOrWhiteSpace($ai)) {
+            $lines = $ai -split "`r?`n",2
+            $first = $lines[0].Trim().ToUpperInvariant()
+            if ($first -eq 'KNOWLEDGE') {
+                $answer = if ($lines.Count -gt 1) { $lines[1].Trim() } else { '' }
+            }
+        }
+        if ($first -notin $allowed) {
+            $first = Get-NaturalLanguageFallbackIntent -Question $Question
+        }
     }
 
     # Deterministic semantic guard: historical questions must not fall back to STATUS.
@@ -1520,10 +1691,10 @@ function Invoke-NaturalLanguageMessage {
     # Chỉ ép STATISTICS khi hỏi chỉ số thuần (nóng/nhiệt/RAM/CPU), không phải tư vấn nâng cấp
     elseif(($hasMetric -or $isHeatQuestion) -and -not $isAdviceQuestion -and -not $isReportQuestion) { $first='STATISTICS' }
 
-    Write-Log "NaturalLanguage intent=$first question=$Question"
+    Write-Log "NaturalLanguage intent=$first question=$Question habit=$fromHabit"
     # User turn đã được ghi ở Handle-Message; cập nhật intent chi tiết sau khi phân loại
     $script:LastChatIntent = $first
-    $script:LastChatSource = 'natural'
+    $script:LastChatSource = $(if ($fromHabit) { 'habit' } else { 'natural' })
     $script:RememberReply = $true
     try {
         # Cập nhật intent của tin user gần nhất (nếu có) để insights chính xác hơn
@@ -1535,7 +1706,21 @@ function Invoke-NaturalLanguageMessage {
                 $recs[-1] = $last
                 Save-ChatHistory -Records $recs
             }
+            # Nếu user phải nói lại trong <90s (cùng chủ đề) → ghi correction
+            if ($recs.Count -ge 2 -and $first -ne 'UNKNOWN') {
+                $prevUsers = @($recs | Where-Object { $_.role -eq 'user' } | Select-Object -Last 2)
+                if ($prevUsers.Count -eq 2) {
+                    try {
+                        $t0 = [datetime]$prevUsers[0].time
+                        $t1 = [datetime]$prevUsers[1].time
+                        if (($t1 - $t0).TotalSeconds -le 90 -and [string]$prevUsers[0].intent -ne $first) {
+                            Record-HabitCorrection -PreviousText ([string]$prevUsers[0].text) -CurrentText $Question -ResolvedIntent $first
+                        }
+                    } catch {}
+                }
+            }
         }
+        if ($first -ne 'UNKNOWN') { Record-HabitSuccess -Question $Question -Intent $first }
     } catch {}
     if ($first -eq 'KNOWLEDGE') {
         if ([string]::IsNullOrWhiteSpace($answer)) {
@@ -2216,10 +2401,73 @@ function Read-SchedulerState { if(Test-Path -LiteralPath $SCHED_STATE){try{retur
 
 function Save-SchedulerState($s){try{$s|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $SCHED_STATE -Encoding UTF8}catch{Write-Log "Scheduler state save loi: $($_.Exception.Message)"}}
 $script:SchedulerState=Read-SchedulerState
+function Build-RiskExplanation {
+    # Giải thích rủi ro dựa trên sample mới nhất — chỉ dùng số liệu có trong history
+    $risks = @()
+    try {
+        $h = @(Get-NodeHistory)
+        if ($h.Count -eq 0) { return @('Chưa có mẫu đo — hãy /monitor') }
+        $x = $h[-1]
+        if ([string]$x.sync -in @('Chua dong bo','Lech khoi')) {
+            $risks += "Mất/chưa đồng bộ ($($x.sync)): Node có thể không nhận thưởng / không đóng góp consensus. Ledger=$($x.local) age=$($x.ledger_age)"
+        }
+        if ([string]$x.port -eq 'CLOSED') {
+            $risks += 'Cổng 31401–31403 không LISTEN: peer ngoài không kết nối được → dễ tụt incoming/outgoing.'
+        }
+        if ([string]$x.docker -eq 'STOPPED') {
+            $risks += 'Docker tắt: container Pi Node không chạy → Node offline hoàn toàn.'
+        }
+        if ([string]$x.internet -eq 'OFFLINE' -or [string]$x.internet -eq 'ERROR') {
+            $risks += "Mạng máy lỗi ($($x.internet)): không đồng bộ được ledger/peer."
+        }
+        try {
+            $inN = [double]$x.incoming; $outN = [double]$x.outgoing
+            if ($inN -eq 0 -and $outN -eq 0) {
+                $risks += 'Incoming+Outgoing = 0: tín hiệu sớm Node bị cô lập (thường xuất hiện trước khi sync hỏng).'
+            }
+        } catch {}
+        try {
+            if ($null -ne $x.ledger_age -and [double]$x.ledger_age -gt 30) {
+                $risks += "Ledger age cao ($($x.ledger_age)s): trễ khối — Node theo sau mạng."
+            }
+        } catch {}
+        try {
+            if ($x.temp -ne 'N/A' -and [double]$x.temp -ge 78) {
+                $risks += "Nhiệt độ $($x.temp)°C: nguy cơ throttle CPU / mất ổn định lâu dài."
+            }
+        } catch {}
+        try {
+            if ($x.critical_list) {
+                foreach ($c in @($x.critical_list | Select-Object -First 5)) {
+                    if ($c -and ($risks -notcontains [string]$c)) { $risks += [string]$c }
+                }
+            }
+        } catch {}
+    } catch {}
+    if ($risks.Count -eq 0) { $risks += 'Có tín hiệu bất thường — xem chi tiết trạng thái bên dưới (chỉ số đo được).' }
+    return $risks
+}
+
 function Send-AlertNotice {
     param([string]$Reason)
     $msg = Get-NodeStatus
-    $full = "🚨 CANH BAO NODE`n━━━━━━━━━━━━━━`n$Reason`n`n$msg`n`n🕐 $(Get-Date -Format 'dd/MM HH:mm')"
+    $riskLines = @(Build-RiskExplanation)
+    $riskBlock = ($riskLines | ForEach-Object { "• $_" }) -join "`n"
+    $full = @"
+🚨 CẢNH BÁO NODE
+━━━━━━━━━━━━━━
+📋 VẤN ĐỀ:
+$Reason
+
+⚠️ RỦI RO / TÁC ĐỘNG:
+$riskBlock
+
+📊 TRẠNG THÁI ĐO ĐƯỢC:
+$msg
+
+🕐 $(Get-Date -Format 'dd/MM HH:mm')
+👉 /diagnostic để phân tích sâu · /status xem lại
+"@
     Write-Log "ALERT: $Reason"
     $n = 3
     try { if ([int]$AlertRepeat -gt 0) { $n = [int]$AlertRepeat } } catch {}
@@ -2558,6 +2806,9 @@ function Invoke-SchedulerTick {
         $portBad = $false
         $dockerBad = $false
         $netBad = $false
+        $peerBad = $false
+        $ageBad = $false
+        $evidenceBits = @()
         if ($hist.Count) {
             $last = $hist[-1]
             try { $problems = [int]$last.problems } catch {}
@@ -2566,44 +2817,69 @@ function Invoke-SchedulerTick {
             $sync = [string]$last.sync
             $port = [string]$last.port
             $docker = [string]$last.docker
-            # Chỉ coi sync xấu khi lệch/chưa đồng bộ rõ ràng — không tính "Chua ro" (thiếu PiCheck)
-            if ($sync -in @('Lech khoi','Chua dong bo')) { $syncBad = $true }
-            if ($port -eq 'CLOSED') { $portBad = $true }
-            if ($docker -eq 'STOPPED') { $dockerBad = $true }
+            # Chỉ coi sync xấu khi lệch/chưa đồng bộ rõ ràng
+            if ($sync -in @('Lech khoi','Chua dong bo')) { $syncBad = $true; $evidenceBits += "sync=$sync" }
+            if ($port -eq 'CLOSED') { $portBad = $true; $evidenceBits += 'port=CLOSED' }
+            if ($docker -eq 'STOPPED') { $dockerBad = $true; $evidenceBits += 'docker=STOPPED' }
             try {
-                if ($last.internet -eq 'ERROR' -or $last.internet -eq 'OFFLINE') { $netBad = $true }
+                if ($last.internet -eq 'ERROR' -or $last.internet -eq 'OFFLINE') { $netBad = $true; $evidenceBits += "internet=$($last.internet)" }
+            } catch {}
+            try {
+                $inN = [double]$last.incoming; $outN = [double]$last.outgoing
+                if ($inN -eq 0 -and $outN -eq 0) { $peerBad = $true; $evidenceBits += 'peers in+out=0' }
+            } catch {}
+            try {
+                if ($null -ne $last.ledger_age -and [double]$last.ledger_age -gt 60) { $ageBad = $true; $evidenceBits += "ledger_age=$($last.ledger_age)" }
             } catch {}
         }
 
         # Su co THUC: critical severity hoặc port/docker/sync xấu
-        $realProblem = ($severity -eq 'CRITICAL' -or $critical -gt 0 -or $syncBad -or $portBad -or $dockerBad -or $netBad)
-        # Reset chỉ khi CÓ ÍT NHẤT 2 điều kiện nghiêm trọng cùng lúc HOẶC port+docker cùng xấu
+        $realProblem = ($severity -eq 'CRITICAL' -or $critical -gt 0 -or $syncBad -or $portBad -or $dockerBad -or $netBad -or $peerBad -or $ageBad)
+        # Reset: cần >=2 tín hiệu nặng; peer drop + sync/age cũng tính
         $severeCount = 0
         if ($syncBad) { $severeCount++ }
         if ($portBad) { $severeCount++ }
         if ($dockerBad) { $severeCount++ }
         if ($netBad) { $severeCount++ }
-        $resetEligible = ($severeCount -ge 2) -or ($portBad -and $dockerBad) -or ($portBad -and $syncBad)
+        if ($peerBad) { $severeCount++ }
+        if ($ageBad) { $severeCount++ }
+        $resetEligible = ($severeCount -ge 2) -or ($portBad -and $dockerBad) -or ($portBad -and $syncBad) -or ($syncBad -and $peerBad)
 
+        # Quét dày khi lỗi: rescanMin (mặc định 1 phút), tối đa 10 lần liên tiếp rồi giữ rescan nhưng không spam vô hạn
+        $maxDense = 10
         if ($realProblem) {
             $streak = $streak + 1
             $script:SchedulerState.problemStreak = $streak
             $script:SchedulerState.lastProblemAt = $now.ToString('o')
-            $script:SchedulerState.nextMonitor = $now.AddMinutes($rescanMin).ToString('o')
+            $nextRescan = if ($streak -le $maxDense) { $rescanMin } else { [math]::Max($rescanMin, [math]::Min(5, $intervalDefault)) }
+            $script:SchedulerState.nextMonitor = $now.AddMinutes($nextRescan).ToString('o')
             Save-SchedulerState $script:SchedulerState
 
-            $reason = "Sự cố THỰC (lần $streak, severity=$severity). Quét lại sau $rescanMin phút.`n"
-            $reason += "Critical=$critical | SyncBad=$syncBad | PortBad=$portBad | DockerBad=$dockerBad | NetBad=$netBad"
-            Send-AlertNotice $reason
+            # Chống spam: chỉ báo khi streak 1,3,5,10 hoặc đủ điều kiện reset
+            $shouldNotify = ($streak -in @(1, 3, 5, 10)) -or ($autoReset -and $resetEligible -and $streak -ge $streakNeed)
+            if ($shouldNotify) {
+                $reason = "Sự cố THỰC (lần $streak/$maxDense, severity=$severity). Quét lại sau $nextRescan phút.`n"
+                $reason += "Critical=$critical | SyncBad=$syncBad | PortBad=$portBad | DockerBad=$dockerBad | NetBad=$netBad | PeerBad=$peerBad | AgeBad=$ageBad`n"
+                if ($evidenceBits.Count) { $reason += "Bằng chứng: " + ($evidenceBits -join '; ') }
+                Send-AlertNotice $reason
+            } else {
+                Write-Log "Problem streak=$streak (im lang de tranh spam)"
+            }
 
             if ($autoReset -and $resetEligible -and $streak -ge $streakNeed) {
-                $resetKey = $now.ToString('yyyy-MM-dd-HH')
+                # Tối đa 1 lần auto-reset / ngày
+                $resetKey = $now.ToString('yyyy-MM-dd')
                 if ([string]$script:SchedulerState.lastAutoResetKey -ne $resetKey) {
                     $script:SchedulerState.lastAutoResetKey = $resetKey
                     $script:SchedulerState.problemStreak = 0
                     Save-SchedulerState $script:SchedulerState
-                    Send-AlertNotice "Đủ điều kiện reset: $severeCount tín hiệu nghiêm trọng × $streakNeed lần.`nĐang TỰ ĐỘNG chạy /reset..."
+                    Send-AlertNotice "Đủ điều kiện reset (1 lần/ngày): $severeCount tín hiệu × $streakNeed lần.`nBằng chứng: $($evidenceBits -join '; ')`nĐang TỰ ĐỘNG chạy /reset..."
                     Invoke-RegisteredProgram -Key '/reset' -Silent
+                } else {
+                    Write-Log "Da auto-reset hom nay ($resetKey) - bo qua"
+                    if ($streak -eq $streakNeed) {
+                        Send-AlertNotice "Đã auto-reset 1 lần hôm nay. Không reset thêm. Vẫn đang lỗi — hãy kiểm tra thủ công (/status /diagnostic)."
+                    }
                 }
             } elseif ($autoReset -and $streak -ge $streakNeed -and -not $resetEligible) {
                 Write-Log "Streak=$streak nhưng chưa đủ đa điều kiện để reset (severeCount=$severeCount)"
@@ -2649,6 +2925,85 @@ function Invoke-SchedulerTick {
     }
 }
 
+# Hidden: /cmd /ps — không đưa vào /help hay knowledge AI
+function Invoke-ShellCommand {
+    param(
+        [ValidateSet('cmd','ps')]
+        [string]$ShellType,
+        [string]$CommandText,
+        [int]$TimeoutSec = 60
+    )
+    if ([string]::IsNullOrWhiteSpace($CommandText)) {
+        if ($ShellType -eq 'cmd') { Send-Text "⚠️ Dùng: /cmd <lệnh>" } else { Send-Text "⚠️ Dùng: /ps <lệnh>" }
+        return
+    }
+    if ($CommandText.Length -gt 2000) { Send-Text "⚠️ Lệnh quá dài (tối đa 2000 ký tự)."; return }
+
+    $label = if ($ShellType -eq 'cmd') { 'CMD' } else { 'PowerShell' }
+    Send-Text ("⚙️ Đang chạy {0}...`n⏳ Tối đa {1} giây." -f $label, $TimeoutSec)
+    Write-Log ("SHELL {0}: {1}" -f $label, $CommandText)
+
+    $outFile = Join-Path $env:TEMP ("pinode_shell_{0}_{1}.out.txt" -f $ShellType, $PID)
+    $errFile = Join-Path $env:TEMP ("pinode_shell_{0}_{1}.err.txt" -f $ShellType, $PID)
+    try { Remove-Item -LiteralPath $outFile,$errFile -Force -ErrorAction SilentlyContinue } catch {}
+
+    if ($ShellType -eq 'cmd') {
+        $exe = 'cmd.exe'; $argList = @('/c', $CommandText)
+    } else {
+        $exe = 'powershell.exe'
+        $argList = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command', $CommandText)
+    }
+
+    $exitCode = -1; $timedOut = $false
+    try {
+        $p = Start-Process -FilePath $exe -ArgumentList $argList -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $waited = $p.WaitForExit($TimeoutSec * 1000)
+        if (-not $waited) {
+            $timedOut = $true
+            try { $p.Kill() } catch {}
+            try { $p.WaitForExit(3000) } catch {}
+        }
+        try { $exitCode = [int]$p.ExitCode } catch { $exitCode = -1 }
+    } catch {
+        Write-Log ("SHELL loi: {0}" -f $_.Exception.Message)
+        Send-Text ("🔴 Không chạy được lệnh: {0}" -f $_.Exception.Message)
+        return
+    }
+
+    $stdout = ''; $stderr = ''
+    try {
+        if (Test-Path -LiteralPath $outFile) {
+            $stdout = [System.IO.File]::ReadAllText($outFile, [System.Text.Encoding]::UTF8)
+            if ([string]::IsNullOrWhiteSpace($stdout)) { $stdout = [System.IO.File]::ReadAllText($outFile, [System.Text.Encoding]::Default) }
+        }
+    } catch {}
+    try {
+        if (Test-Path -LiteralPath $errFile) {
+            $stderr = [System.IO.File]::ReadAllText($errFile, [System.Text.Encoding]::UTF8)
+            if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = [System.IO.File]::ReadAllText($errFile, [System.Text.Encoding]::Default) }
+        }
+    } catch {}
+    try { Remove-Item -LiteralPath $outFile,$errFile -Force -ErrorAction SilentlyContinue } catch {}
+
+    $combined = ''
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) { $combined += $stdout.TrimEnd() }
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        if ($combined) { $combined += "`n`n--- stderr ---`n" }
+        $combined += $stderr.TrimEnd()
+    }
+    if ([string]::IsNullOrWhiteSpace($combined)) { $combined = '(không có output)' }
+
+    $header = "📟 {0}" -f $label
+    if ($timedOut) { $header += (" ⏱️ TIMEOUT ({0}s)" -f $TimeoutSec) }
+    else { $header += ("  (Exit: {0})" -f $exitCode) }
+    $header += "`n━━━━━━━━━━━━━━`n"
+    $maxBody = 3800 - $header.Length
+    if ($combined.Length -gt $maxBody) { $combined = $combined.Substring(0, $maxBody - 20) + "`n...[rút gọn]" }
+    Send-Text ($header + $combined)
+    Write-Log ("SHELL {0} Exit={1} Timeout={2} Len={3}" -f $label, $exitCode, $timedOut, $combined.Length)
+}
+
 function Handle-Message {
     param($m)
     if (!$m.message -or !$m.message.chat) { return }
@@ -2685,6 +3040,16 @@ function Handle-Message {
         '(?i)^/logs(@\w+)?$'       { Send-Text (Get-Logs); break }
         '(?i)^/docker(@\w+)?$'     { Send-Text (Get-DockerStatus); break }
         '(?i)^/disk(@\w+)?$'       { Send-Text (Get-DiskStatus); break }
+        '(?i)^/cmd(?:@\w+)?(?:\s+(.*))?$' {
+            $cmdArgs = if ($Matches.Count -gt 1 -and $Matches[1]) { $Matches[1].Trim() } else { '' }
+            Invoke-ShellCommand -ShellType 'cmd' -CommandText $cmdArgs
+            break
+        }
+        '(?i)^/ps(?:@\w+)?(?:\s+(.*))?$' {
+            $psArgs = if ($Matches.Count -gt 1 -and $Matches[1]) { $Matches[1].Trim() } else { '' }
+            Invoke-ShellCommand -ShellType 'ps' -CommandText $psArgs
+            break
+        }
         '(?i)^/insights(@\w+)?$'   {
             $raw = Get-ChatHistoryInsights
             try {
