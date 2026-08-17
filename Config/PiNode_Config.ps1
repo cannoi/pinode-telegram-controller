@@ -59,14 +59,18 @@ $CleanRamScript = Join-Path $DataDir 'CleanRAM_PiNode.ps1'
 $MaintenanceScript = Join-Path $DataDir 'Weekly_Maintenance.ps1'
 $DiagnosticScript = Join-Path $DataDir 'Pi_Node_Diagnostic_PRO.ps1'
 $ResetNodeScript = Join-Path $DataDir 'Reset_Node_Network.ps1'
-$ProblemRescanMinutes = 10
-$ProblemStreakBeforeReset = 5
+$ProblemRescanMinutes = 1
+$ProblemStreakBeforeReset = 3
 $AutoResetOnSyncPortFail = $true
+$LedgerAgeMaxSec = 30
+$DiskFreeMinGB = 20
+$DiskSampleMinutes = 30
+$NodeHistoryMaxRecords = 2500
 $SendTeleScript = Join-Path $DataDir 'send_tele.ps1'
 
 # Lich trinh: im lang khi an toan; chi Telegram khi Node co van de / loi
 $SchedulerEnabled = $true
-$MonitorIntervalMinutes = 60
+$MonitorIntervalMinutes = 5
 $MonitorRunOnControllerStart = $false
 $DailyReportHours = @(7, 18)
 $MaintenanceDayOfWeek = 0
