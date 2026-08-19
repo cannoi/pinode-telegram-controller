@@ -1,4 +1,7 @@
-﻿# PI NODE TELEGRAM CONTROLLER PRO
+﻿if (Test-Path "$PSScriptRoot/Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/Modules/Updated_Core_Logic.ps1" } elseif (Test-Path "$PSScriptRoot/../Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/../Modules/Updated_Core_Logic.ps1" } elseif (Test-Path "$PSScriptRoot/../../Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/../../Modules/Updated_Core_Logic.ps1" }
+$SecurityModule = Join-Path (Split-Path -Parent $PSScriptRoot) "Modules\Security_Guard.ps1"
+if (Test-Path -LiteralPath $SecurityModule) { . $SecurityModule }
+# PI NODE TELEGRAM CONTROLLER PRO v11.1 — INTEGRATED LIVE READER
 # Windows PowerShell 5.1 - UTF-8 BOM
 # Central Config + integrated scheduler + single-instance mutex
 $ErrorActionPreference = 'Stop'
@@ -15,6 +18,7 @@ $ConfigFile = Join-Path $AppRoot 'Config\PiNode_Config.ps1'
 if (!(Test-Path -LiteralPath $ConfigFile)) { throw "Khong tim thay Config trung tam: $ConfigFile" }
 . $ConfigFile
 $BASE_DIR=$AppRoot; $CONTROLLER_LOG=$ControllerLog; $LOG_DIR=$LogDir; $HISTORY_FILE=$HistoryFile
+$HISTORY_ARCHIVE_DIR = Join-Path $DataDir 'History\Node'
 $CHAT_HISTORY_FILE = if ($ChatHistoryFile) { $ChatHistoryFile } else { Join-Path $DataDir 'chat_history.json' }
 $CHAT_HISTORY_MAX = if ($ChatHistoryMaxRecords) { [int]$ChatHistoryMaxRecords } else { 500 }
 $CHAT_HISTORY_CONTEXT_TURNS = if ($ChatHistoryContextTurns) { [int]$ChatHistoryContextTurns } else { 8 }
@@ -23,7 +27,8 @@ $HERMES_CONTAINER=$HermesContainer; $HERMES_TIMEOUT_SEC=$HermesTimeoutSec; $HERM
 $REGISTERED=$Registered
 $BOT_TOKEN=$BotToken
 $CHAT_ID=$ChatId
-New-Item -ItemType Directory -Force -Path $BASE_DIR,$LOG_DIR,$StateDir | Out-Null
+New-Item -ItemType Directory -Force -Path $BASE_DIR,$LOG_DIR,$StateDir,$DataDir | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $DataDir 'PiNodeMonitorLive\history'), (Join-Path $DataDir 'History\Node') -ErrorAction SilentlyContinue | Out-Null
 if ([string]::IsNullOrWhiteSpace($BotToken)) { throw 'CHUA CO BOT TOKEN trong Config\PiNode_Config.ps1' }
 if ([string]::IsNullOrWhiteSpace($ChatId)) { throw 'CHUA CO CHAT ID trong Config\PiNode_Config.ps1' }
 $script:ControllerMutex=New-Object System.Threading.Mutex($false,'Global\PiNodeTelegramControllerPRO')
@@ -38,7 +43,13 @@ function Cleanup-Controller { try{Remove-Item -LiteralPath $PID_FILE -Force -Err
 function Write-Log {
     param([string]$Text)
     try {
-        $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $Text"
+        # Never persist credentials or bearer-like secrets in logs.
+        $safe = [string]$Text
+        if (-not [string]::IsNullOrWhiteSpace($BOT_TOKEN)) { $safe = $safe.Replace([string]$BOT_TOKEN,'[REDACTED_BOT_TOKEN]') }
+        if (-not [string]::IsNullOrWhiteSpace($GeminiApiKey)) { $safe = $safe.Replace([string]$GeminiApiKey,'[REDACTED_GEMINI_KEY]') }
+        $safe = $safe -replace '(?i)(bot[0-9]{6,}:[A-Za-z0-9_-]{20,})','[REDACTED_BOT_TOKEN]'
+        $safe = $safe -replace '(?i)(AQ\.[A-Za-z0-9_-]{20,})','[REDACTED_GEMINI_KEY]'
+        $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $safe"
         Add-Content -Path $CONTROLLER_LOG -Value $line -Encoding UTF8
         if ((Test-Path $CONTROLLER_LOG) -and ((Get-Item $CONTROLLER_LOG).Length -gt $MAX_LOG_BYTES)) {
             Move-Item $CONTROLLER_LOG "$CONTROLLER_LOG.old" -Force
@@ -54,8 +65,16 @@ if ([string]::IsNullOrWhiteSpace($CHAT_ID)) {
 
 $script:PendingMaintenance = $false
 $script:PendingMaintenanceAt = $null
+$script:PendingCleanRam = $false
+$script:PendingCleanRamAt = $null
 $script:PendingReset = $false
 $script:PendingResetAt = $null
+$script:PendingShell = $false
+$script:PendingShellAt = $null
+$script:PendingShellType = $null
+$script:PendingShellCommand = $null
+$script:PendingStopController = $false
+$script:PendingStopControllerAt = $null
 $script:Offset = 0
 
 function Invoke-Telegram {
@@ -76,26 +95,56 @@ function Invoke-Telegram {
     }
 }
 
+function Get-MainKeyboardJson {
+    # JSON san cho Telegram (tranh ConvertTo-Json PS5.1 lam vo mang long nhau)
+    return '{"inline_keyboard":[[{"text":"📊 Status","callback_data":"/status"},{"text":"📷 Capture","callback_data":"/screenshot"}],[{"text":"📡 Node","callback_data":"/node"},{"text":"🔗 Peers","callback_data":"/peers"},{"text":"📈 Report","callback_data":"/report"}],[{"text":"🐳 Docker","callback_data":"/docker"},{"text":"💽 Disk","callback_data":"/disk"},{"text":"📜 Logs","callback_data":"/logs"}],[{"text":"🛠️ Diagnostic","callback_data":"/diagnostic"},{"text":"⚙️ Settings","callback_data":"/settings"}],[{"text":"❓ Help","callback_data":"/help"},{"text":"🛑 Tắt Controller","callback_data":"/stopcontroller"}]]}'
+}
+
 function Send-Text {
     param(
         [string]$Text,
-        [switch]$Remember
+        [switch]$Remember,
+        [switch]$WithKeyboard,
+        [object]$Keyboard
     )
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
     if ($Text.Length -gt 3900) { $Text = $Text.Substring(0,3890) + "`n...[rut gon]" }
-    Invoke-Telegram 'sendMessage' @{ chat_id=$CHAT_ID; text=$Text; disable_web_page_preview='true' } | Out-Null
-    # Ghi nhớ phản hồi bot khi được yêu cầu (hoặc theo cờ phiên NL)
+    if ($WithKeyboard -or $Keyboard) {
+        $kbJson = if ($Keyboard) {
+            if ($Keyboard -is [string]) { $Keyboard } else { ($Keyboard | ConvertTo-Json -Compress -Depth 12) }
+        } else { Get-MainKeyboardJson }
+        # Ghep JSON thu cong de reply_markup la object hop le
+        $esc = ($Text -replace '\\','\\' -replace '"','\"' -replace "`n",'\n' -replace "`r",'')
+        $payload = "{`"chat_id`":`"$CHAT_ID`",`"text`":`"$esc`",`"disable_web_page_preview`":true,`"reply_markup`":$kbJson}"
+        try {
+            $uri = "https://api.telegram.org/bot$BOT_TOKEN/sendMessage"
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+            Invoke-RestMethod -Uri $uri -Method Post -Body $bytes -ContentType 'application/json; charset=utf-8' -TimeoutSec $REQUEST_TIMEOUT | Out-Null
+        } catch {
+            Write-Log "Send-Text keyboard loi: $($_.Exception.Message)"
+            Invoke-Telegram 'sendMessage' @{ chat_id=$CHAT_ID; text=$Text; disable_web_page_preview='true' } | Out-Null
+        }
+    } else {
+        Invoke-Telegram 'sendMessage' @{ chat_id=$CHAT_ID; text=$Text; disable_web_page_preview='true' } | Out-Null
+    }
     if ($Remember -or $script:RememberReply) {
         try {
             $intent = if ($script:LastChatIntent) { [string]$script:LastChatIntent } else { '' }
             $src = if ($script:LastChatSource) { [string]$script:LastChatSource } else { 'reply' }
-            # Bỏ qua tin xác nhận ngắn để khỏi làm nhiễu ngữ cảnh
             if ($Text -notmatch '^📩 Đã nhận yêu cầu') {
                 Add-ChatTurn -Role 'assistant' -Text $Text -Intent $intent -Source $src
             }
         } catch {}
         $script:RememberReply = $false
     }
+}
+
+function Answer-CallbackQuery {
+    param([string]$Id, [string]$Text = '')
+    if ([string]::IsNullOrWhiteSpace($Id)) { return }
+    $body = @{ callback_query_id = $Id }
+    if ($Text) { $body.text = $Text; $body.show_alert = $false }
+    Invoke-Telegram 'answerCallbackQuery' $body | Out-Null
 }
 
 function Send-Photo {
@@ -119,6 +168,103 @@ function Send-Photo {
         Write-Log "SendPhoto loi: $($_.Exception.Message)"
         return $false
     }
+}
+
+function Get-PiWindowCaptureBounds {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class PiWinCapture {
+ [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+ [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+ [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+ [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+ public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+ public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+}
+'@ -ErrorAction SilentlyContinue
+    $hits = New-Object System.Collections.Generic.List[object]
+    $keywords = @('PiCheck','Pi Network','Pi Node','Pi Desktop')
+    $cb = [PiWinCapture+EnumWindowsProc]{ param($h,$l)
+        if(-not [PiWinCapture]::IsWindowVisible($h)){return $true}
+        $sb=New-Object Text.StringBuilder 512; [void][PiWinCapture]::GetWindowText($h,$sb,$sb.Capacity)
+        $title=$sb.ToString(); if([string]::IsNullOrWhiteSpace($title)){return $true}
+        foreach($k in $keywords){ if($title -like "*$k*"){ $r=New-Object PiWinCapture+RECT; if([PiWinCapture]::GetWindowRect($h,[ref]$r)){ $w=$r.Right-$r.Left; $hgt=$r.Bottom-$r.Top; if($w -gt 300 -and $hgt -gt 200){ [void]$hits.Add([pscustomobject]@{Title=$title;Left=$r.Left;Top=$r.Top;Width=$w;Height=$hgt;Score=($k.Length*10000)+($w*$hgt)}) } } break } }
+        return $true
+    }
+    [void][PiWinCapture]::EnumWindows($cb,[IntPtr]::Zero)
+    return ($hits | Sort-Object Score -Descending | Select-Object -First 1)
+}
+
+function Invoke-Screenshot {
+    param([switch]$Silent,[switch]$AnalyzeWithAI)
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $path = Join-Path $env:TEMP ("PiNode_Screenshot_{0}_{1}.png" -f $PID,$stamp)
+    $source='Desktop fallback'
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $win=Get-PiWindowCaptureBounds
+        if($win){
+            $bmp=New-Object System.Drawing.Bitmap $win.Width,$win.Height
+            $g=[System.Drawing.Graphics]::FromImage($bmp)
+            try{$g.CopyFromScreen($win.Left,$win.Top,0,0,$bmp.Size,[System.Drawing.CopyPixelOperation]::SourceCopy)}finally{$g.Dispose()}
+            try{$bmp.Save($path,[System.Drawing.Imaging.ImageFormat]::Png)}finally{$bmp.Dispose()}
+            $source="Cửa sổ Pi: $($win.Title)"
+        } else {
+            $vs=[System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bmp=New-Object System.Drawing.Bitmap $vs.Width,$vs.Height
+            $g=[System.Drawing.Graphics]::FromImage($bmp)
+            try{$g.CopyFromScreen($vs.Left,$vs.Top,0,0,$bmp.Size,[System.Drawing.CopyPixelOperation]::SourceCopy)}finally{$g.Dispose()}
+            try{$bmp.Save($path,[System.Drawing.Imaging.ImageFormat]::Png)}finally{$bmp.Dispose()}
+        }
+        if(!(Test-Path -LiteralPath $path)){throw 'Không tạo được ảnh.'}
+        $caption="📷 Pi Node Telegram Controller PRO`n🕐 $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')"
+        $ok=Send-Photo -Path $path -Caption $caption
+        if(-not $ok){throw 'Telegram không nhận được ảnh.'}
+        if($AnalyzeWithAI){
+            $analysis=Invoke-GeminiVisionOnImage -ImagePath $path -Source $source
+            if($analysis){Send-Text $analysis}
+        }
+        return $true
+    }catch{
+        Write-Log "Smart Capture lỗi: $($_.Exception.Message)"
+        if(-not $Silent){Send-Text "⚠️ Không chụp được Pi Desktop.`nHệ thống đã thử cửa sổ Pi trước rồi mới dùng toàn màn hình.`nLý do: $($_.Exception.Message)"}
+        return $false
+    }finally{Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue}
+}
+
+function Invoke-GeminiVisionOnImage {
+    param([string]$ImagePath,[string]$Source='Pi Desktop')
+    if([string]::IsNullOrWhiteSpace($GeminiApiKey) -or !(Test-Path $ImagePath)){return $null}
+    try{
+        $bytes=[IO.File]::ReadAllBytes($ImagePath); $b64=[Convert]::ToBase64String($bytes)
+        $latest=Get-LiveLatestPath; $evidence='{}'
+        if($latest){try{$evidence=Get-Content $latest -Raw -Encoding UTF8}catch{}}
+        $prompt=@"
+Bạn là bộ phận xác minh sự cố Pi Node. Ảnh là $Source.
+Nguồn sự thật chính là Live Data JSON bên dưới. Không được tự đoán số liệu không nhìn thấy.
+Hãy đọc các thông tin Pi Desktop nhìn thấy trong ảnh, đối chiếu với Live Data, và trả lời ngắn gọn theo cấu trúc:
+1) Ảnh cho thấy gì?
+2) Có khớp Live Data không?
+3) Nếu lệch, điểm nào lệch và mức độ chắc chắn?
+4) Người dùng nên làm gì tiếp theo?
+Nếu ảnh không đủ rõ, nói rõ "chưa đủ bằng chứng". Không được tự ý yêu cầu reset nếu chưa có bằng chứng.
+LIVE DATA:
+$evidence
+"@
+        foreach($model in @($GeminiModels)){
+            try{
+                $uri="https://generativelanguage.googleapis.com/v1beta/models/$model`:generateContent?key=$GeminiApiKey"
+                $body=@{contents=@(@{parts=@(@{text=$prompt},@{inline_data=@{mime_type='image/png';data=$b64}})});generationConfig=@{temperature=0.1;maxOutputTokens=900}}|ConvertTo-Json -Depth 12
+                $r=Invoke-RestMethod -Uri $uri -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 45
+                $txt=[string]$r.candidates[0].content.parts[0].text
+                if($txt){return "🔎 XÁC MINH ẢNH + LIVE DATA`n━━━━━━━━━━━━━━`n$txt"}
+            }catch{Write-Log "Vision model $model lỗi: $($_.Exception.Message)"}
+        }
+    }catch{Write-Log "Vision lỗi: $($_.Exception.Message)"}
+    return $null
 }
 
 function Send-PhotoUrl {
@@ -410,12 +556,51 @@ function Get-ChatHistoryInsights {
 # ===== USER PREFERENCES (phong cách trả lời theo từng khách) =====
 $USER_PREFS_FILE = Join-Path $StateDir 'user_preferences.json'
 
+
+function Get-ContainerNameSetting {
+    $prefs = Read-UserPreferences
+    if ($prefs.containerName -and [string]$prefs.containerName -ne '') { return [string]$prefs.containerName }
+    $cf = Join-Path $DataDir 'PiNodeMonitorLive\container_name.txt'
+    if (Test-Path -LiteralPath $cf) {
+        $n = (Get-Content -LiteralPath $cf -Raw -EA SilentlyContinue).Trim()
+        if ($n) { return $n }
+    }
+    if ($PiContainerName) { return [string]$PiContainerName }
+    return 'testnet2'
+}
+
+function Set-ContainerNameSetting {
+    param([string]$Name)
+    $Name = $Name.Trim()
+    $prefs = Read-UserPreferences
+    $prefs.containerName = $Name
+    Save-UserPreferences $prefs | Out-Null
+    $dir = Join-Path $DataDir 'PiNodeMonitorLive'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Set-Content -LiteralPath (Join-Path $dir 'container_name.txt') -Value $Name -Encoding ASCII
+}
+
+function Test-AlertAllowed {
+    $prefs = Read-UserPreferences
+    $mode = [string]$prefs.alertMode
+    if ($mode -eq 'off') { return $false }
+    if ($mode -eq 'night') {
+        $h = [int](Get-Date).Hour
+        # Quiet 22:00 - 07:00 local
+        if ($h -ge 22 -or $h -lt 7) { return $false }
+    }
+    return $true
+}
+
+
 function Get-DefaultUserPreferences {
     return [ordered]@{
-        style = 'balanced'   # simple | balanced | numeric
+        style = 'balanced'
         language = 'vi'
         showTips = $true
         verboseNumbers = $false
+        alertMode = 'on'
+        containerName = ''
         updatedAt = (Get-Date).ToString('o')
     }
 }
@@ -425,13 +610,17 @@ function Read-UserPreferences {
     if (!(Test-Path -LiteralPath $USER_PREFS_FILE)) { return $d }
     try {
         $raw = Get-Content -LiteralPath $USER_PREFS_FILE -Raw -Encoding UTF8 | ConvertFrom-Json
-        foreach ($k in @('style','language','showTips','verboseNumbers')) {
+        foreach ($k in @('style','language','showTips','verboseNumbers','alertMode','containerName')) {
             if ($null -ne $raw.PSObject.Properties[$k]) { $d[$k] = $raw.$k }
         }
         $d.style = ([string]$d.style).ToLowerInvariant()
         if ($d.style -notin @('simple','balanced','numeric')) { $d.style = 'balanced' }
         $d.showTips = [bool]$d.showTips
         $d.verboseNumbers = [bool]$d.verboseNumbers
+        if (-not $d.alertMode) { $d.alertMode = 'on' }
+        $d.alertMode = ([string]$d.alertMode).ToLowerInvariant()
+        if ($d.alertMode -notin @('on','off','night')) { $d.alertMode = 'on' }
+        if ($null -eq $d.containerName) { $d.containerName = '' }
         return $d
     } catch { return (Get-DefaultUserPreferences) }
 }
@@ -516,29 +705,102 @@ function Get-InsightLine {
 }
 
 function Get-NodeHistory {
-    if (!(Test-Path -LiteralPath $HISTORY_FILE)) { return @() }
+
+    # Single history source: Data\PiNodeMonitorLive\history\YYYY-MM-DD.ndjson (raw 7 days).
+
+    $dir = Join-Path $DataDir 'PiNodeMonitorLive\history'
+
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+
+    
+
     try {
-        $raw = Get-Content $HISTORY_FILE -Raw -Encoding UTF8
-        if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
-        $x = $raw | ConvertFrom-Json
-        if ($x -is [array]) { return @($x) }
-        return @($x)
+
+        # Chỉ lọc lấy file có đuôi .ndjson và bỏ qua các file ẩn/system như .gitkeep
+
+        $files = Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue | 
+
+                 Where-Object { $_.Extension -eq '.ndjson' -and -not $_.Name.StartsWith('.') } | 
+
+                 Sort-Object Name
+
+
+
+        if (-not $files) { return @() }
+
+
+
+        $out = [System.Collections.Generic.List[PSObject]]::new()
+
+
+
+        foreach ($f in $files) {
+
+            $lines = Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue
+
+            if (-not $lines) { continue }
+
+
+
+            foreach ($line in $lines) {
+
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+                try {
+
+                    $o = $line | ConvertFrom-Json -ErrorAction SilentlyContinue
+
+                    if ($null -ne $o) {
+
+                        $out.Add($o)
+
+                    }
+
+                } catch {}
+
+            }
+
+        }
+
+
+
+        if ($out.Count -gt 5000) {
+
+            return @($out | Select-Object -Last 5000)
+
+        }
+
+        return $out.ToArray()
+
     } catch {
-        Write-Log "Khong doc duoc node_history.json: $($_.Exception.Message)"
+
+        Write-Log "Không đọc được NDJSON history: $($_.Exception.Message)"
+
         return @()
+
     }
+
 }
+
+
 
 function To-Num($v) {
     try { return [double]$v } catch { return $null }
 }
 
 function Get-NodeStatus {
-    $h = @(Get-NodeHistory)
-    if ($h.Count -eq 0) {
-        return "⚠️ Chưa có dữ liệu.`n👉 Gửi /monitor để kiểm tra."
+    $x = $null
+    $latestPath = Join-Path $DataDir 'PiNodeMonitorLive\latest.json'
+    if (Test-Path -LiteralPath $latestPath) {
+        try { $x = Get-Content -LiteralPath $latestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
     }
-    $x = $h[-1]
+    if (-not $x) {
+        $h = @(Get-NodeHistory)
+        if ($h.Count -eq 0) {
+            return "⚠️ Chưa có dữ liệu live.`n👉 Hãy chạy Start_Controller.bat (Live data sẽ tự bật).`nSau vài phút gửi lại /status.`nNếu Docker lỗi tên container: /settings container testnet2"
+        }
+        $x = $h[-1]
+    }
     $time = try { ([datetime]$x.time).ToString('dd/MM HH:mm') } catch { "$($x.time)" }
     $problem = 0; $critical = 0; $severity = 'OK'
     try { $problem = [int]$x.problems } catch {}
@@ -593,55 +855,76 @@ function Get-NodeStatus {
         return $t
     }
 
-    # balanced (default)
+    # balanced (default) — form dong bo, de doc
+    $inVal = if ($null -ne $x.incoming) { $x.incoming } elseif ($null -ne $x.peer_in) { $x.peer_in } else { '—' }
+    $outVal = if ($null -ne $x.outgoing) { $x.outgoing } elseif ($null -ne $x.peer_out) { $x.peer_out } else { '—' }
+    $ledger = if ($null -ne $x.local -and "$($x.local)" -ne '') { $x.local } else { '—' }
+    $age = if ($null -ne $x.ledger_age -and "$($x.ledger_age)" -ne '') { "$($x.ledger_age)s" } else { '—' }
+    $ram = if ($null -ne $x.ram_sys) { "$($x.ram_sys)%" } else { '—' }
+    $cpu = if ($null -ne $x.cpu_sys) { "$($x.cpu_sys)%" } else { '—' }
+    $ctn = if ($x.pi_container) { $x.pi_container } else { '—' }
+
     $t = "$head`n"
-    $t += "──────────────`n"
-    $t += "🕐 $time`n"
-    $t += "$sI  Đồng bộ · $syncShow`n"
-    $t += "📦  Ledger · $($x.local)"
-    if ($null -ne $x.ledger_age -and "$($x.ledger_age)" -ne '') { $t += " (age $($x.ledger_age)s)" }
-    $t += "`n"
-    $t += "🔗  Peer · In $($x.incoming) / Out $($x.outgoing)`n"
-    $t += "🐳  Docker · $($x.docker) $dI`n"
-    $t += "🔌  Cổng · $($x.port) $pI`n"
-    $t += "🧠  RAM · $($x.ram_sys)%   ⚙️ CPU · $($x.cpu_sys)%`n"
-    $t += "🌡️  Nhiệt độ · $temp°C"
-    if ($null -ne $x.quorum_phase -and "$($x.quorum_phase)" -ne '') { $t += "`n🗳️  Quorum · $($x.quorum_phase)" }
+    $t += "━━━━━━━━━━━━━━━━`n"
+    $t += "🕐  $time`n"
+    $t += "━━━━━━━━━━━━━━━━`n"
+    $t += "$sI  Đồng bộ     $syncShow`n"
+    $t += "📦  Ledger      $ledger   · age $age`n"
+    $t += "🔗  Peer        In $inVal  /  Out $outVal`n"
+    $t += "🐳  Docker      $($x.docker) $dI`n"
+    $t += "🔌  Cổng        $($x.port) $pI`n"
+    $t += "📦  Container   $ctn`n"
+    $t += "━━━━━━━━━━━━━━━━`n"
+    $t += "🧠  RAM $ram   ⚙️ CPU $cpu   🌡️ $temp°C`n"
+    if ($null -ne $x.quorum_phase -and "$($x.quorum_phase)" -ne '') {
+        $t += "🗳️  Quorum      $($x.quorum_phase)`n"
+    }
     if ($critical -gt 0) {
-        $t += "`n🚨  Sự cố nghiêm trọng · $critical"
+        $t += "━━━━━━━━━━━━━━━━`n"
+        $t += "🚨  Sự cố ($critical)`n"
         try {
             if ($x.critical_list) {
-                $clist = @($x.critical_list)
-                foreach ($c in ($clist | Select-Object -First 5)) { $t += "`n   • $c" }
+                foreach ($c in (@($x.critical_list) | Select-Object -First 5)) { $t += "   • $c`n" }
             }
         } catch {}
     }
     elseif ($severity -eq 'WARNING' -and $problem -gt 0) {
-        $t += "`n⚠️  Cảnh báo · $problem"
+        $t += "━━━━━━━━━━━━━━━━`n"
+        $t += "⚠️  Cảnh báo ($problem)`n"
         try {
             if ($x.warning_list) {
-                foreach ($w in (@($x.warning_list) | Select-Object -First 4)) { $t += "`n   • $w" }
+                foreach ($w in (@($x.warning_list) | Select-Object -First 4)) { $t += "   • $w`n" }
             }
         } catch {}
     }
-    $t += "`n──────────────`n"
-    $t += "💬 $insight"
+    $t += "━━━━━━━━━━━━━━━━`n"
+    $t += "💬  $insight`n"
     if ($prefs.showTips -and -not $good -and $critical -eq 0) {
-        $t += "`n👉 Gợi ý: /diagnostic nếu muốn phân tích sâu hơn."
+        $t += "👉  /diagnostic nếu cần phân tích sâu`n"
     }
-    if ($x.source) { $t += "`n📡 Nguồn: $($x.source)" }
-    return $t
+    $ageTxt = ''
+    try {
+        if ($x.time) {
+            $ageS = [math]::Round(((Get-Date) - [datetime]$x.time).TotalSeconds, 0)
+            if ($ageS -ge 0) { $ageTxt = "`n⏱ Dữ liệu: $ageS giây trước" }
+        }
+    } catch {}
+    $t += "📡 Pi Node Telegram Controller PRO$ageTxt"
+    return $t.TrimEnd()
 }
 
 function Get-NodeReport {
     param([int]$Days = 1)
     if ($Days -lt 1) { $Days = 1 }
-    $h = @(Get-NodeHistory)
-    if ($h.Count -eq 0) { return "⚠️ Chưa có dữ liệu history.`n👉 Gửi /monitor để tạo dữ liệu." }
-
-    $cut = (Get-Date).AddDays(-$Days)
-    $day = @($h | Where-Object { try { [datetime]$_.time -ge $cut } catch { $false } })
-    if ($day.Count -eq 0) { return "⚠️ Không có dữ liệu trong $Days ngày vừa qua.`n👉 Hãy chạy /monitor thường xuyên hơn để có đủ dữ liệu thống kê." }
+    # Dùng Get-HistoryRows: NDJSON 7 ngày + archive History\Node (nếu có) — cùng nguồn với STATISTICS/AI
+    $day = @(Get-HistoryRows -Days $Days)
+    if ($day.Count -eq 0) {
+        $h = @(Get-NodeHistory)
+        if ($h.Count -eq 0) {
+            return "⚠️ Chưa có dữ liệu history.`n👉 Hãy dùng /status để đọc dữ liệu hiện tại; /monitor chỉ dùng khi cần xác minh bằng ảnh + AI."
+        }
+        return "⚠️ Không có dữ liệu trong $Days ngày vừa qua.`n👉 Hãy để Live Data chạy ổn định; /monitor chỉ dùng khi cần xác minh bằng ảnh + AI."
+    }
 
     $problems = @($day | Where-Object { try { [int]$_.problems -gt 0 } catch { $false } }).Count
     $syncOk = @($day | Where-Object { [string]$_.sync -eq 'Dong bo tot' }).Count
@@ -725,10 +1008,16 @@ function Get-StatPeriodLabel {
 
 function Get-HistoryRows {
     param([int]$Days = 7)
-    $h=@(Get-NodeHistory)
-    if($h.Count -eq 0){ return @() }
-    $cut=(Get-Date).AddDays(-[math]::Max(1,$Days))
-    return @($h | Where-Object { try {[datetime]$_.time -ge $cut} catch {$false} })
+    $cut=(Get-Date).AddDays(-[math]::Max(1,$Days)); $rows=@()
+    try{$rows += @(Get-NodeHistory)}catch{}
+    if(Test-Path -LiteralPath $HISTORY_ARCHIVE_DIR){
+        try{
+            $files=Get-ChildItem $HISTORY_ARCHIVE_DIR -Filter 'NodeHistory_*.ndjson' -File -ErrorAction SilentlyContinue | Where-Object {$_.LastWriteTime -ge $cut.AddDays(-1)}
+            foreach($f in $files){foreach($line in @(Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue)){if($line.Trim()){try{$rows += ($line|ConvertFrom-Json)}catch{}}}}
+        }catch{Write-Log "Long history read loi: $($_.Exception.Message)"}
+    }
+    $uniq=@{}; foreach($r in $rows){try{$t=[datetime]$r.time;if($t -ge $cut){$uniq[[string]$r.time]=$r}}catch{}}
+    return @($uniq.Values|Sort-Object {try{[datetime]$_.time}catch{Get-Date}})
 }
 
 function Get-StatNumberArray {
@@ -854,14 +1143,28 @@ function Get-DockerStatus {
     try {
         $svc = Get-Service -Name 'com.docker.service' -ErrorAction SilentlyContinue
         $docker = (& docker version --format '{{.Server.Version}}' 2>$null)
-        $containers = (& docker ps --format '{{.Names}}|{{.Status}}' 2>$null)
+        $containers = (& docker ps --format '{{.Names}} | {{.Image}} | {{.Status}}' 2>$null)
         $text = "🐳 DOCKER`n`n"
+        $configured = Get-ContainerNameSetting
+        $text += "Container đang cấu hình: $configured`n"
         $text += "Service: " + $(if ($svc) { $svc.Status } else { 'N/A' }) + "`n"
         $text += "Engine: " + $(if ($docker) { "OK ($docker)" } else { 'Khong truy cap duoc' }) + "`n"
+        # Pi container đã nhận diện gần nhất (từ latest/history)
+        try {
+            $lr = Get-LatestLiveRecord
+            if ($lr -and $lr.pi_container) {
+                $text += "Pi container (monitor): $($lr.pi_container)`n"
+            }
+        } catch {}
         if ($containers) {
-            $text += "Container dang chay:`n" + ($containers -join "`n")
+            $text += "Container đang chạy:`n" + ($containers -join "`n")
+            $names = @($containers | ForEach-Object { ($_ -split '\s+\|',2)[0].Trim() })
+            if ($configured -and $configured -notin $names) {
+                $text += "`n⚠️ Không tìm thấy container đang cấu hình: $configured`n👉 Nếu Pi Node đang chạy với tên khác, dùng /settings container <ten-container> (ví dụ: testnet2)."
+            }
         } else {
-            $text += "Container dang chay: Khong thay"
+            $text += "Container đang chạy: Chưa thấy`n"
+            $text += "👉 Nếu Pi Node đang chạy, mở docker ps để xem tên container rồi dùng /settings container <ten-container> (ví dụ: testnet2)."
         }
         return $text
     } catch {
@@ -879,6 +1182,123 @@ function Get-DiskStatus {
     } catch {
         return "🔴 Khong doc duoc o C: $($_.Exception.Message)"
     }
+}
+
+
+function Get-LatestLiveRecord {
+    # Ưu tiên latest.json (đồng bộ với /status), fallback mẫu cuối NDJSON history
+    $latestPath = Get-LiveLatestPath
+    if ($latestPath) {
+        try {
+            $x = Get-Content -LiteralPath $latestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($x) { return $x }
+        } catch { Write-Log "Get-LatestLiveRecord latest.json: $($_.Exception.Message)" }
+    }
+    $h = @(Get-NodeHistory)
+    if ($h.Count -gt 0) { return $h[-1] }
+    return $null
+}
+
+function Get-LiveNodeDetail {
+    # Ưu tiên latest.json (cùng nguồn /status), fallback history — không suy đoán
+    $x = Get-LatestLiveRecord
+    if (-not $x) {
+        return "⚠️ Chưa có dữ liệu live.`n👉 Hãy dùng /status để đọc dữ liệu Live; /monitor chỉ dùng để xác minh bằng ảnh + AI khi cần."
+    }
+    $time = try { ([datetime]$x.time).ToString('dd/MM HH:mm:ss') } catch { "$($x.time)" }
+    $t = "📡 NODE LIVE (stellar-core)`n━━━━━━━━━━━━━━`n"
+    $t += "🕐 $time`n"
+    $t += "📦 Container: $(if($x.pi_container){$x.pi_container}else{'—'})`n"
+    $t += "🔄 Sync: $($x.sync)`n"
+    $t += "📒 Ledger: $($x.local)"
+    if ($null -ne $x.ledger_age -and "$($x.ledger_age)" -ne '') { $t += " | Age: $($x.ledger_age)s" }
+    $t += "`n"
+    $t += "🔗 Peer: In $($x.incoming) / Out $($x.outgoing)"
+    if ($null -ne $x.peers_auth) { $t += " | Auth: $($x.peers_auth)" }
+    $t += "`n"
+    if ($x.quorum_phase) { $t += "🗳️ Quorum: $($x.quorum_phase)" }
+    if ($null -ne $x.quorum_lag_ms -and "$($x.quorum_lag_ms)" -ne '') { $t += " | Lag: $($x.quorum_lag_ms) ms" }
+    $t += "`n"
+    if ($x.protocol) { $t += "📐 Protocol: $($x.protocol)`n" }
+    if ($x.build) { $t += "🏗️ Build: $($x.build)`n" }
+    $t += "🐳 Docker: $($x.docker) | Port: $($x.port)`n"
+    $t += "🌡️ Temp: $($x.temp) | RAM: $($x.ram_sys)% | CPU: $($x.cpu_sys)%`n"
+    $ageTxt2 = ''
+    try {
+        if ($x.time) {
+            $ageS2 = [math]::Round(((Get-Date) - [datetime]$x.time).TotalSeconds, 0)
+            if ($ageS2 -ge 0) { $ageTxt2 = "`n⏱ Dữ liệu: $ageS2 giây trước" }
+        }
+    } catch {}
+    $t += "📡 Pi Node Telegram Controller PRO$ageTxt2`n"
+    if ($x.evidence) {
+        $t += "━━━━━━━━━━━━━━`n🔎 Bằng chứng:`n"
+        try {
+            if ($x.evidence -is [System.Collections.IDictionary] -or $x.evidence.PSObject.Properties['Keys']) {
+                $n = 0
+                foreach ($prop in @($x.evidence.PSObject.Properties)) {
+                    if ($n -ge 8) { break }
+                    $t += "• $($prop.Name)=$($prop.Value)`n"
+                    $n++
+                }
+            } else {
+                foreach ($e in @($x.evidence | Select-Object -First 8)) { $t += "• $e`n" }
+            }
+        } catch {
+            foreach ($e in @($x.evidence | Select-Object -First 8)) { $t += "• $e`n" }
+        }
+    }
+    if ($x.critical_list) {
+        $t += "━━━━━━━━━━━━━━`n🚨 Critical:`n"
+        foreach ($c in @($x.critical_list | Select-Object -First 6)) { $t += "• $c`n" }
+    }
+    if ($x.warning_list) {
+        $t += "⚠️ Warning:`n"
+        foreach ($w in @($x.warning_list | Select-Object -First 6)) { $t += "• $w`n" }
+    }
+    return $t.TrimEnd()
+}
+
+function Get-PeersDetail {
+    $h = @(Get-NodeHistory)
+    $x = Get-LatestLiveRecord
+    if (-not $x) {
+        return "⚠️ Chưa có dữ liệu peer.`n👉 Chạy Live Service (Start_Controller) rồi thử lại."
+    }
+    if ($h.Count -eq 0) { $h = @($x) }
+    $t = "🔗 PEERS (đo từ stellar-core)`n━━━━━━━━━━━━━━`n"
+    $t += "Incoming:  $($x.incoming)`n"
+    $t += "Outgoing:  $($x.outgoing)`n"
+    if ($null -ne $x.peers_auth) { $t += "Authenticated: $($x.peers_auth)`n" }
+    $t += "`n"
+    # Xu hướng so với mẫu trước
+    if ($h.Count -ge 2) {
+        $p = $h[-2]
+        try {
+            $pIn = [double]$p.incoming; $pOut = [double]$p.outgoing
+            $cIn = [double]$x.incoming; $cOut = [double]$x.outgoing
+            $sumP = $pIn + $pOut; $sumC = $cIn + $cOut
+            $t += "Xu hướng vs mẫu trước:`n"
+            $t += "• In+Out: $sumP → $sumC"
+            if ($sumP -gt 0 -and $sumC -lt ($sumP * 0.5)) { $t += " ⚠️ sụt mạnh" }
+            elseif ($sumP -eq 0 -and $sumC -ge 2) { $t += " ✅ đang phục hồi" }
+            elseif ($sumC -gt $sumP) { $t += " ✅ tăng" }
+            $t += "`n"
+            $t += "• In: $pIn → $cIn | Out: $pOut → $cOut`n"
+        } catch {
+            $t += "(Chưa đủ số liệu để so xu hướng)`n"
+        }
+    }
+    $t += "`n💡 Peer In+Out = 0 hoặc sụt >50% thường là tín hiệu sớm Node có vấn đề."
+    $ageTxt3 = ''
+    try {
+        if ($x.time) {
+            $ageS3 = [math]::Round(((Get-Date) - [datetime]$x.time).TotalSeconds, 0)
+            if ($ageS3 -ge 0) { $ageTxt3 = "`n⏱ Dữ liệu: $ageS3 giây trước" }
+        }
+    } catch {}
+    $t += "`n📡 Pi Node Telegram Controller PRO$ageTxt3"
+    return $t
 }
 
 function Get-HermesContainer {
@@ -1062,7 +1482,7 @@ NGUON DU LIEU:
 CAU TRUC:
 - Config/PiNode_Config.ps1: cau hinh Telegram BotToken, ChatId, GeminiApiKey, danh sach model Gemini, Hermes container, timeout, nguong canh bao, lich scheduler va duong dan module.
 - Controller/PiNode_Telegram_Controller_PRO_v2.0.ps1: bo nao trung tam; nhan Telegram, dieu phoi lenh, scheduler, log, goi module, gui text/photo.
-- Data/PiNode_SmartMonitor_v9_CentralConfig.ps1: monitor live (stellar-core + Docker + OHM); ghi node_history.json.
+- Data/PiNode_SmartMonitor_v9_CentralConfig.ps1: monitor live (stellar-core + Docker + OHM); ghi history/*.ndjson.
 - Data/OpenHardwareMonitorLib.dll: cam bien nhiet (tuy chon).
 - Data/CleanRAM_PiNode.ps1: don RAM va rac he thong theo logic module; dung khi may nang.
 - Data/Weekly_Maintenance.ps1: bao tri dinh ky; cleanup he thong/Docker va cac tac vu toi uu theo script. /maintenance luon yeu cau /confirm khi nguoi dung goi thu cong.
@@ -1079,7 +1499,7 @@ CAU TRUC:
 - Commands/commands.json: danh sach lenh chuan.
 - Logs/: controller.log va log hoat dong.
 - State/: PID, scheduler state, welcome flag va trang thai noi bo.
-- Data/node_history.json: du lieu lich su monitor (toi da ~2500 mau).
+- Data/history/*.ndjson: du lieu lich su monitor (toi da ~2500 mau).
 
 CAI DAT:
 1. Giai nen bo app vao thu muc co quyen ghi.
@@ -1093,13 +1513,13 @@ CAI DAT:
 
 LENH CHUAN:
 /help = menu huong dan
-/status = doc trang thai gan nhat tu node_history.json
+/status = doc trang thai gan nhat tu history/*.ndjson
 /monitor = chay Smart Monitor ngay
 /monitors = alias /monitor
 /report = bao cao 24 gio tu history
 /diagnostic = chan doan
 /cleanram = don RAM
-/screenshot = chup man hinh va gui anh
+/evidence = xem bằng chứng dữ liệu live, không dùng ảnh/OCR
 /logs = doc log gan day
 /docker = kiem tra Docker
 /disk = kiem tra o C:
@@ -1118,7 +1538,7 @@ VI DU NGON NGU TU NHIEN:
 - "May ngay nay Pi Node toi on khong?" -> REPORT
 - "Cho toi xem Docker" -> DOCKER
 - "O C con bao nhieu?" -> DISK
-- "Chup anh man hinh" -> SCREENSHOT
+- "bằng chứng dữ liệu live" -> EVIDENCE
 - "Don RAM giup toi" -> CLEANRAM
 - "Chan doan Node" -> DIAGNOSTIC
 - "Bao tri may" -> MAINTENANCE_CONFIRM
@@ -1187,10 +1607,10 @@ function Get-RequestedPeriodDays {
 
 function Get-HistoryContextForAI {
     param([int]$Days = 7, [int]$MaxRecords = 120)
-    $h=@(Get-NodeHistory)
+    # Cùng nguồn với /report, STATISTICS, AI lịch sử: NDJSON + archive
+    $h = @(Get-HistoryRows -Days $Days)
     if($h.Count -eq 0){ return 'KHONG CO NODE_HISTORY.' }
-    $cut=(Get-Date).AddDays(-[math]::Max(1,$Days))
-    $sel=@($h | Where-Object { try {[datetime]$_.time -ge $cut} catch {$false} } | Select-Object -Last $MaxRecords)
+    $sel = @($h | Select-Object -Last $MaxRecords)
     if($sel.Count -eq 0){ return 'KHONG CO DU LIEU TRONG KHOANG THOI GIAN DUOC YEU CAU.' }
     try { return ($sel | ConvertTo-Json -Depth 5 -Compress) } catch { return 'KHONG THE DOC HISTORY.' }
 }
@@ -1270,6 +1690,17 @@ function Get-HistoricalEvidenceForAI {
     } | ConvertTo-Json -Depth 10 -Compress
 }
 
+function Get-EvidenceFooter {
+    param([int]$Days=7)
+    $rows=@(Get-HistoryRows -Days $Days)
+    if($rows.Count -eq 0){return '📎 Bằng chứng: không có dữ liệu trong khoảng yêu cầu.'}
+    $last=$rows[-1];$problems=@($rows|Where-Object{try{[int]$_.problems -gt 0}catch{$false}}).Count
+    $temps=@($rows|ForEach-Object{To-Num $_.temp}|Where-Object{$null -ne $_})
+    $tmax=if($temps.Count){[math]::Round(($temps|Measure-Object -Maximum).Maximum,1)}else{'—'}
+    $tavg=if($temps.Count){[math]::Round(($temps|Measure-Object -Average).Average,1)}else{'—'}
+    return "📎 Bằng chứng dữ liệu: $($rows.Count) mẫu trong $Days ngày · $problems mẫu có vấn đề · Nhiệt TB/Max $tavg/$tmax°C · Mẫu cuối $($last.time) · Sync=$($last.sync) · Ledger=$($last.local) Age=$($last.ledger_age)s · In/Out=$($last.incoming)/$($last.outgoing) · RAM/CPU=$($last.ram_sys)%/$($last.cpu_sys)% · Docker=$($last.docker) · Port=$($last.port)"
+}
+
 function Invoke-HistoricalAIAnalysis {
     param(
         [Parameter(Mandatory)][string]$Question,
@@ -1290,7 +1721,7 @@ $(Get-ChatHistoryContext -Turns 6)
 KHOANG THOI GIAN:
 $Days ngay
 
-DU LIEU THUC TE TU node_history.json:
+DU LIEU THUC TE TU history/*.ndjson:
 $evidence
 
 NHIEM VU:
@@ -1347,7 +1778,7 @@ QUY TẮC:
 
     $answer=Invoke-GeminiAPI -Prompt $prompt
     if([string]::IsNullOrWhiteSpace($answer)){ return $null }
-    return $answer.Trim()
+    return ($answer.Trim() + "`n`n" + (Get-EvidenceFooter -Days $Days))
 }
 
 function Invoke-GeminiNaturalLanguage {
@@ -1358,11 +1789,13 @@ function Invoke-GeminiNaturalLanguage {
     $prompt = @"
 BAN LA AI ROUTER CUA PI NODE TELEGRAM CONTROLLER PRO.
 NHIEM VU: Hieu y dinh tin nhan tieng Viet tu nhien va chon intent.
-INTENT: STATUS, MONITOR, REPORT, STATISTICS, ADVICE, DOCKER, DISK, SCREENSHOT, LOGS, SCHEDULER, DIAGNOSTIC, CLEANRAM, MAINTENANCE_CONFIRM, RESET_CONFIRM, HELP, DONATE, ASK_HERMES, KNOWLEDGE, UNKNOWN.
+INTENT: STATUS, MONITOR, SCREENSHOT, SETTINGS, REPORT, STATISTICS, ADVICE, DOCKER, DISK, EVIDENCE, LOGS, SCHEDULER, DIAGNOSTIC, CLEANRAM, MAINTENANCE_CONFIRM, RESET_CONFIRM, HELP, DONATE, ASK_HERMES, KNOWLEDGE, UNKNOWN.
 
 QUY TAC:
 - may toi the nao/tinh trang hien tai (KHONG hoi nong/nhiet/RAM/CPU theo thoi gian) => STATUS.
-- kiem tra/chay monitor/bao cao nhanh => MONITOR.
+- kiem tra/xac minh su co bang anh, doc Pi Desktop/PiCheck bang anh + AI => MONITOR.
+- chup man hinh, chup anh, screenshot, capture => SCREENSHOT.
+- cai dat/doi ten container/cau hinh bao dong/phong cach tra loi => SETTINGS.
 - cau hoi lich su/bao cao tong quat => REPORT. Cac cau nhu '30 ngay qua may toi co su co gi khong?' phai la REPORT, khong duoc chon STATUS.
 - cau hoi nham vao mot chi so cu the (nhiet do, nong, RAM, CPU...) ke ca khi khong noi ro thoi gian => STATISTICS.
   Vi du BAT BUOC la STATISTICS:
@@ -1372,7 +1805,7 @@ QUY TAC:
   - "Tuan nay nhiet do the nao?"
   - "7 ngay qua RAM co cao khong?"
 - Cau hoi ve 'su co/loi/bat thuong' trong mot khoang thoi gian ma khong chi ro chi so => REPORT de AI phan tich tong the.
-- Docker/container => DOCKER; o C/o dia/dung luong => DISK; chup anh/man hinh => SCREENSHOT.
+- Docker/container => DOCKER; o C/o dia/dung luong => DISK; bằng chứng live => EVIDENCE.
 - don RAM => CLEANRAM; bao tri => MAINTENANCE_CONFIRM; reset => RESET_CONFIRM.
 - hoi cach cai dat, script nao lam gi, app dung de lam gi => KNOWLEDGE.
 - khong duoc dung KNOWLEDGE cho cau hoi can du lieu may thuc te.
@@ -1412,12 +1845,16 @@ function Get-NaturalLanguageFallbackIntent {
     # Deterministic fallback: natural language still works when Gemini is unavailable,
     # returns malformed output, or the model is temporarily rate-limited.
     if ($q -match '^(help|trợ giúp|huong dan|hướng dẫn)$' -or $q -match 'cach dung|cách dùng|lenh nao|lệnh nào') { return 'HELP' }
-    if ($q -match 'chup.*(anh|hinh|màn hình|man hinh)|screenshot|ảnh màn hình|hinh man hinh') { return 'SCREENSHOT' }
     if ($q -match 'don.*ram|dọn.*ram|giai phong ram|giải phóng ram|ram.*day|ram.*cao|ram.*nang') { return 'CLEANRAM' }
     if ($q -match 'bao tri|bảo trì|maintenance|toi uu may|tối ưu máy') { return 'MAINTENANCE_CONFIRM' }
     if ($q -match 'reset.*(node|mang|mạng)|khoi phuc mang|khôi phục mạng|dat lai node|đặt lại node') { return 'RESET_CONFIRM' }
+    if ($q -match 'chup man hinh|chụp màn hình|screenshot|capture|chup anh|chụp ảnh') { return 'SCREENSHOT' }
+    if ($q -match 'cai dat|cài đặt|doi ten container|đổi tên container|ten container|tên container|bao dong|báo động|phong cach tra loi|phong cách trả lời') { return 'SETTINGS' }
     if ($q -match 'docker|container') { return 'DOCKER' }
     if ($q -match 'o c|ổ c|o dia|ổ đĩa|dung luong|dung lượng|disk|free space') { return 'DISK' }
+    if ($q -match 'bằng chứng|bang chung|evidence|số liệu đo|so lieu do') { return 'EVIDENCE' }
+    if ($q -match 'sức khỏe|suc khoe|health|toàn diện|toan dien|tình trạng máy|tinh trang may') { return 'HEALTH' }
+    if ($q -match 'lịch sử|lich su|30 ngày|30 ngay|xu hướng|xu huong|trend') { return 'HISTORY' }
     if ($q -match 'scheduler|task scheduler|lich chay|lịch chạy|tu dong khoi dong|tự động khởi động|tắt lịch|tat lich|bật lịch|bat lich|chu kỳ quét|chu ky quet|interval') { return 'SCHEDULER' }
     if ($q -match 'log|nhat ky|nhật ký') { return 'LOGS' }
     if ($q -match 'chan doan|chẩn đoán|tai sao.*loi|tại sao.*lỗi|nguyen nhan|nguyên nhân') { return 'DIAGNOSTIC' }
@@ -1436,7 +1873,9 @@ function Get-NaturalLanguageFallbackIntent {
     if ($isHeatQuestion -and -not $isAdvice) { return 'STATISTICS' }
 
     if ($q -match 'may ngay|mấy ngày|hom qua|hôm qua|tuan nay|tuần này|thang nay|tháng này|lich su|lịch sử|on khong|ổn không|bao cao|báo cáo|thong ke|thống kê|vừa qua|vua qua') { return 'REPORT' }
-    if ($q -match 'monitor|kiem tra ngay|kiểm tra ngay|kiem tra node|kiểm tra node|tien hanh|tiến hành|kiem tra nhanh|kiểm tra nhanh') { return 'MONITOR' }
+    if ($q -match 'xác minh.*anh|xac minh.*anh|kiem tra.*bang anh|kiểm tra.*bằng ảnh|doc pi desktop|đọc pi desktop|monitor|kiểm tra ngay|kiem tra ngay|kiem tra node|kiểm tra node|tien hanh|tiến hành|kiem tra nhanh|kiểm tra nhanh') { return 'MONITOR' }
+    if ($q -match 'peer|incoming|outgoing|ket noi peer|kết nối peer') { return 'PEERS' }
+    if ($q -match 'chi tiet node|chi tiết node|ledger age|quorum|stellar') { return 'NODE' }
 
     # STATUS chỉ khi hỏi tình trạng hiện tại, không có từ khóa lịch sử/nhiệt
     if ($q -match 'may toi|máy tôi|tinh trang|tình trạng|node.*the nao|node.*thế nào|node.*sao|dang chay|đang chạy') {
@@ -1611,7 +2050,7 @@ QUY TẮC:
         $lines += "💡 Gợi ý: Theo dõi thêm 7–14 ngày. Nếu RAM/CPU/ổ đĩa vượt ngưỡng trên, hãy nâng cấp đúng thành phần được ưu tiên."
         return ($lines -join "`n")
     }
-    return $answer.Trim()
+    return ($answer.Trim() + "`n`n" + (Get-EvidenceFooter -Days $Days))
 }
 
 function Test-ReplyMatchesQuestion {
@@ -1640,7 +2079,7 @@ function Invoke-NaturalLanguageMessage {
     param([string]$Question)
     if ([string]::IsNullOrWhiteSpace($Question)) { Send-Text (Show-Help); return }
 
-    $allowed = @('STATUS','MONITOR','REPORT','STATISTICS','ADVICE','DOCKER','DISK','SCREENSHOT','LOGS','SCHEDULER','DIAGNOSTIC','CLEANRAM','MAINTENANCE_CONFIRM','RESET_CONFIRM','HELP','DONATE','ASK_HERMES','KNOWLEDGE')
+    $allowed = @('STATUS','MONITOR','SCREENSHOT','SETTINGS','NODE','PEERS','REPORT','STATISTICS','ADVICE','DOCKER','DISK','EVIDENCE','LOGS','SCHEDULER','DIAGNOSTIC','CLEANRAM','MAINTENANCE_CONFIRM','RESET_CONFIRM','HELP','DONATE','ASK_HERMES','KNOWLEDGE','EVIDENCE','HEALTH','HISTORY','TRENDS')
     $first = ''
     $answer = $null
     $fromHabit = $false
@@ -1731,8 +2170,12 @@ function Invoke-NaturalLanguageMessage {
     }
 
     switch ($first) {
-        'STATUS' { Send-Text (Get-NodeStatus); break }
-        'MONITOR' { Invoke-SmartMonitor; break }
+        'STATUS' { Send-Text -Text (Get-NodeStatus) -WithKeyboard; break }
+        'MONITOR' { Invoke-BackupMonitor; break }
+        'SCREENSHOT' { Invoke-Screenshot; break }
+        'SETTINGS' { Send-Text (Get-SettingsMenu); break }
+        'NODE' { Send-Text (Get-LiveNodeDetail); break }
+        'PEERS' { Send-Text (Get-PeersDetail); break }
         'REPORT' {
             $days=Get-RequestedPeriodDays -Question $Question
             $analysis=Invoke-HistoricalAIAnalysis -Question $Question -Days $days
@@ -1784,9 +2227,23 @@ function Invoke-NaturalLanguageMessage {
             }
             break
         }
+        'EVIDENCE' {
+            $x=Get-LatestLiveRecord; if($x){Send-Text (Get-NodeEvidenceMessage -Record $x -Title '📎 PI NODE — BẰNG CHỨNG ĐO ĐƯỢC')} else {Send-Text '⚠️ Chưa có snapshot dữ liệu.'}; break
+        }
+        'HEALTH' { Send-Text -Text (Get-NodeStatus) -WithKeyboard; break }
+        'HISTORY' {
+            $days=Get-RequestedPeriodDays -Question $Question
+            if($days -lt 7){$days=30}
+            $a=Invoke-HistoricalAIAnalysis -Question $Question -Days $days
+            if($a){Send-Text $a}else{Send-Text (Get-NodeReport -Days $days)}; break
+        }
+        'TRENDS' {
+            $a=Invoke-HistoricalAIAnalysis -Question $Question -Days 7
+            if($a){Send-Text $a}else{Send-Text (Get-NodeReport -Days 7)}; break
+        }
         'DOCKER' { Send-Text (Get-DockerStatus); break }
         'DISK' { Send-Text (Get-DiskStatus); break }
-        'SCREENSHOT' { Invoke-Screenshot; break }
+        'EVIDENCE' { Invoke-LiveEvidence; break }
         'LOGS' { Send-Text (Get-Logs); break }
         'SCHEDULER' {
             $qLow = $Question.ToLowerInvariant()
@@ -1802,7 +2259,11 @@ function Invoke-NaturalLanguageMessage {
             break
         }
         'DIAGNOSTIC' { Invoke-DiagnosticAI -UserQuestion $Question; break }
-        'CLEANRAM' { Invoke-RegisteredProgram '/cleanram'; break }
+        'CLEANRAM' {
+            $script:PendingCleanRam = $true; $script:PendingCleanRamAt = Get-Date
+            Send-Text "🧹 DỌN RAM — XÁC NHẬN`n`nAI hiểu yêu cầu là chạy tác vụ dọn RAM/cache/DNS đã đăng ký.`nGửi /confirmcleanram trong $ConfirmTimeout giây để thực hiện.`nGửi /cancel để hủy."
+            break
+        }
         'HELP' { Send-Text (Show-Help); break }
         'DONATE' { Invoke-Donate; break }
         'ASK_HERMES' { Invoke-HermesQuestion -Question $Question; break }
@@ -1999,6 +2460,11 @@ function Invoke-RegisteredProgram {
         }
 
         $path = [string]$REGISTERED[$Key]
+        if (-not (Test-PiNodeSafePath -Path $path -Root $BASE_DIR)) {
+            Write-Log "Chan path ngoai AppRoot: $Key"
+            Send-Text "🔴 Từ chối đường dẫn không an toàn cho $Key."
+            return
+        }
         if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
             Send-Text "🔴 Khong tim thay file:`n$path"
             Write-Log "Khong tim thay $Key : $path"
@@ -2089,30 +2555,10 @@ function Invoke-RegisteredProgram {
     }
 }
 
-function Invoke-Screenshot {
-    Send-Text "📸 Đang chụp màn hình...`n⏳ Vui lòng chờ."
-    $file = Join-Path $env:TEMP 'pinode_telegram_screenshot.png'
-    try {
-        Add-Type -AssemblyName System.Windows.Forms
-        Add-Type -AssemblyName System.Drawing
-        $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-        $bmp = New-Object System.Drawing.Bitmap $screen.Width,$screen.Height
-        $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $g.CopyFromScreen($screen.Left,$screen.Top,0,0,$bmp.Size)
-        $bmp.Save($file,[System.Drawing.Imaging.ImageFormat]::Png)
-        $g.Dispose()
-        $bmp.Dispose()
-        if (Send-Photo -Path $file -Caption "PI NODE SCREENSHOT - $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')") {
-            Send-Text "✅ Da gui anh man hinh."
-        } else {
-            Send-Text "🔴 Gui anh that bai."
-        }
-    } catch {
-        Send-Text "🔴 Screenshot loi: $($_.Exception.Message)"
-        Write-Log "Screenshot loi: $($_.Exception.Message)"
-    } finally {
-        if (Test-Path $file) { Remove-Item $file -Force -ErrorAction SilentlyContinue }
-    }
+function Invoke-LiveEvidence {
+    $x = Get-LatestLiveRecord
+    if (-not $x) { Send-Text '⚠️ Chưa có dữ liệu live. Chạy Live Service (Start_Controller) rồi thử lại.'; return }
+    Send-Text (Get-NodeEvidenceMessage -Record $x -Title '📊 PI NODE — BẰNG CHỨNG LIVE')
 }
 
 
@@ -2171,9 +2617,11 @@ Chọn phong cách trả lời (gõ lệnh):
    Phù hợp khi bạn thích theo dõi số liệu sát.
 
 Khác:
-• /settings tips on|off  — bật/tắt dòng gợi ý
-• /settings show         — xem cấu hình hiện tại
-• /settings reset        — về mặc định (balanced + tips on)
+• /settings tips on|off  — bat/tat goi y
+• /settings container <ten> — ten container Pi Node (vd: testnet2)
+• /settings alert on|off|night — bao dong: bat / tat / tat dem (22h-7h)
+• /settings show         — xem cau hinh
+• /settings reset        — ve mac dinh
 
 📌 Lịch quét / ngưỡng cảnh báo / tự reset:
    Dùng /scheduler (menu riêng, có giải thích từng tham số).
@@ -2214,6 +2662,33 @@ function Handle-SettingsCommand {
             }
             $msg = "✅ Đã chọn phong cách: *$label*`nGửi /status hoặc hỏi tự nhiên để xem khác biệt."
         }
+        
+        '^(container|ctn|tencontainer)$' {
+            $rawName = if ($parts.Count -gt 1) { ($parts[1..($parts.Count-1)] -join ' ').Trim() } else { '' }
+            if ([string]::IsNullOrWhiteSpace($rawName)) {
+                $cur = Get-ContainerNameSetting
+                Send-Text "Container hien tai: $cur`n`nDat ten: /settings container testnet2`n`nTip: mo CMD go docker ps de xem ten container dang chay."
+                return
+            }
+            Set-ContainerNameSetting $rawName
+            Send-Text "✅ Da luu ten container: $rawName`nLive Monitor se dung ten nay o lan quet tiep theo.`nNeu van loi: kiem tra bang lenh docker ps."
+            return
+        }
+        '^(alert|baodong|bao)$' {
+            if ($val -notin @('on','off','night','bat','tat','dem')) {
+                Send-Text "Chon: /settings alert on|off|night`n• on = luon bao`n• off = tat het`n• night = tat tu 22h den 7h"
+                return
+            }
+            if ($val -in @('bat')) { $val = 'on' }
+            if ($val -in @('tat')) { $val = 'off' }
+            if ($val -in @('dem')) { $val = 'night' }
+            $prefs.alertMode = $val
+            Save-UserPreferences $prefs | Out-Null
+            $label = switch ($val) { 'off' { 'Tat hoan toan' } 'night' { 'Tat ban dem (22h-7h)' } default { 'Bat' } }
+            Send-Text "✅ Bao dong: $label"
+            return
+        }
+
         '^(tips|tip|goy|gợi)$' {
             if ($val -match '^(on|bat|bật|1|true)$') {
                 $prefs.showTips = $true
@@ -2241,60 +2716,42 @@ function Handle-SettingsCommand {
 }
 
 function Show-Help {
-
     return @"
-🤖 PI NODE CONTROLLER
+🤖  PI NODE CONTROLLER
+━━━━━━━━━━━━━━━━
+Giám sát • bảo trì • xử lý sự cố Pi Node qua Telegram.
 
-Chào mừng bạn đến với Pi Node Controller.
+📊  GIÁM SÁT
+  /status      Trạng thái nhanh
+  /monitor     Xác minh sự cố: ảnh + AI, chỉ dùng dự phòng
+  /screenshot  Chụp ảnh Pi Desktop/cửa sổ Node
+  /node        Chi tiết + bằng chứng
+  /peers       Peer In/Out + xu hướng
+  /report      Báo cáo 24h
+  /health      Đánh giá sức khỏe
+  /evidence    Bằng chứng đo mới nhất
+  /history     Lịch sử dài hạn
+  /trends      Xu hướng + AI
+  /scheduler   Lịch tự động
+  /settings    Cài đặt container, báo động, phong cách
 
-Bot giúp bạn giám sát • bảo trì • xử lý sự cố Pi Node trực tiếp qua Telegram.
+🛠️  BẢO TRÌ
+  /cleanram → /confirmcleanram · /maintenance → /confirm · /diagnostic
+  /reset → /confirmreset · /cancel
 
-━━━━━━━━━━━━━━
+🖥️  HỆ THỐNG
+  /docker · /disk · /logs · /screenshot · /insights
+  /stopcontroller  Tắt Controller (cần /confirmstop)
 
-📊 GIÁM SÁT
-/status — Trạng thái Node
-/monitor — Kiểm tra chuyên sâu
-/report — Báo cáo hệ thống
-/settings — Phong cách trả lời (đơn giản / số liệu / cân bằng)
-/scheduler — Xem & chỉnh lịch tự động
+💬  TIỆN ÍCH
+  /ask <câu hỏi> · /help · /donate
 
-🛠️ BẢO TRÌ
-/cleanram — Dọn RAM an toàn
-/maintenance — Bảo trì định kỳ
-/diagnostic — Chẩn đoán hệ thống
-/reset — Reset mạng + Docker
-/cancel — Hủy thao tác
-
-🖥️ HỆ THỐNG
-/docker — Kiểm tra Docker
-/disk — Kiểm tra ổ đĩa
-/logs — Xem nhật ký
-/screenshot — Chụp màn hình
-/insights — Thống kê tương tác (gợi ý nâng cấp app)
-
-💬 TIỆN ÍCH
-/ask <câu hỏi> — Hỏi Hermes
-/help — Xem hướng dẫn
-/donate — Ủng hộ dự án
-
-━━━━━━━━━━━━━━
-
-⚙️ TỰ ĐỘNG HÓA
-
-• Kiểm tra Node mỗi 60 phút
-• Phát hiện lỗi → gửi cảnh báo Telegram
-• Lỗi đồng bộ / port lặp lại → tự xử lý
-• Báo cáo hệ thống lúc 07:00 & 18:00
-
-🔐 An toàn • Tự động • Ổn định
-
-Pi Node Controller đang giám sát hệ thống của bạn.
-
-☕ Ủng hộ: MB Bank 0905428801 — TRAN HUU NGHI
-   Quan cà phê cho tác giả là vui rồi 😄 · /donate
+━━━━━━━━━━━━━━━━
+Cảnh báo chỉ gửi khi lỗi kéo dài ≥75s (chống báo giả).
+Auto-Reset chỉ khi lỗi >15 phút + xác nhận (Net/user), tối đa 1 lần/ngày.
+Dùng nút bên dưới để xem nhanh.
 "@
 }
-
 
 
 
@@ -2369,7 +2826,7 @@ function Apply-SchedulerSettings {
     param($Settings)
     $script:SchedEnabled = [bool]$Settings.enabled
     $script:SchedMonitorInterval = [math]::Max(5, [math]::Min(1440, [int]$Settings.monitorIntervalMinutes))
-    $script:SchedRescanMinutes = [math]::Max(3, [math]::Min(180, [int]$Settings.problemRescanMinutes))
+    $script:SchedRescanMinutes = [math]::Max(1, [math]::Min(180, [int]$Settings.problemRescanMinutes))
     $script:SchedReportHours = @($Settings.dailyReportHours | ForEach-Object { [int]$_ } | Where-Object { $_ -ge 0 -and $_ -le 23 } | Select-Object -Unique)
     if ($script:SchedReportHours.Count -eq 0) { $script:SchedReportHours = @(7, 18) }
     $script:SchedMaintDay = [math]::Max(0, [math]::Min(6, [int]$Settings.maintenanceDayOfWeek))
@@ -2397,7 +2854,7 @@ function Get-SchedulerDayName([int]$d) {
     }
 }
 
-function Read-SchedulerState { if(Test-Path -LiteralPath $SCHED_STATE){try{return Get-Content -LiteralPath $SCHED_STATE -Raw -Encoding UTF8|ConvertFrom-Json}catch{}}; return [pscustomobject]@{nextMonitor=(Get-Date).AddMinutes($MonitorIntervalMinutes).ToString('o');lastReportKey='';lastMaintenanceKey='';problemStreak=0;lastProblemAt='';lastAutoResetKey=''} }
+function Read-SchedulerState { if(Test-Path -LiteralPath $SCHED_STATE){try{return Get-Content -LiteralPath $SCHED_STATE -Raw -Encoding UTF8|ConvertFrom-Json}catch{}}; return [pscustomobject]@{nextMonitor=(Get-Date).AddMinutes($MonitorIntervalMinutes).ToString('o');lastReportKey='';lastMaintenanceKey='';problemStreak=0;lastProblemAt='';lastAutoResetKey='';lastAlertAt='';problemStartedAt='';pendingResetConfirm=$false} }
 
 function Save-SchedulerState($s){try{$s|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $SCHED_STATE -Encoding UTF8}catch{Write-Log "Scheduler state save loi: $($_.Exception.Message)"}}
 $script:SchedulerState=Read-SchedulerState
@@ -2450,6 +2907,7 @@ function Build-RiskExplanation {
 
 function Send-AlertNotice {
     param([string]$Reason)
+    if (-not (Test-AlertAllowed)) { Write-Log "Alert suppressed (alertMode)"; return }
     $msg = Get-NodeStatus
     $riskLines = @(Build-RiskExplanation)
     $riskBlock = ($riskLines | ForEach-Object { "• $_" }) -join "`n"
@@ -2482,94 +2940,137 @@ $msg
     }
 }
 
+function Get-NodeEvidenceMessage {
+    param([Parameter(Mandatory)]$Record,[string]$Title='⚠️ PI NODE — CẢNH BÁO')
+    $lines=@($Title,'','🔎 Vấn đề có bằng chứng:')
+    foreach($x in @($Record.critical_list)){if($x){$lines += "🔴 $x"}}
+    foreach($x in @($Record.warning_list)){if($x){$lines += "🟡 $x"}}
+    $lines += ''; $lines += '📊 Dữ liệu đo được:'
+    $lines += "• Thời điểm: $($Record.time)"
+    $lines += "• Đồng bộ: $($Record.sync) | Ledger: $($Record.local) | Age: $($Record.ledger_age)s"
+    $lines += "• Peer: In $($Record.incoming) / Out $($Record.outgoing)"
+    if($null -ne $Record.peer_drop_pct){$lines += "• Peer trend: $($Record.peer_drop_pct)% so với mẫu trước"}
+    $lines += "• Docker: $($Record.docker) | Container: $($Record.pi_container)"
+    $lines += "• Port: $($Record.port) | Internet: $($Record.internet)"
+    $lines += "• CPU: $($Record.cpu_sys)% | RAM: $($Record.ram_sys)% | Nhiệt: $($Record.temp)°C"
+    if($null -ne $Record.vmmem_gb){$lines += "• VMMEM: $($Record.vmmem_gb) GB"}
+    if($Record.vhdx -and $Record.vhdx.largest_gb){$lines += "• Docker VHDX lớn nhất: $($Record.vhdx.largest_gb) GB"}
+    $lines += "• Pi Desktop: $($Record.pi_desktop)"; $lines += ''
+    $lines += '📎 Nguồn: stellar-core + Docker + Windows/CIM + OpenHardwareMonitorLib (nếu sensor khả dụng).'
+    return ($lines -join "`n")
+}
+
+function Test-ControllerAdmin {
+    try {
+        return ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+
+function Invoke-BackupMonitor {
+    param([switch]$Silent)
+    # Backup path: screenshot desktop (Pi Desktop) for human/AI confirmation - does NOT replace live metrics
+    if (-not $Silent) {
+        Send-Text @"
+📷 Che do du phong (anh man hinh)
+
+Dung de doi chieu voi Pi Desktop khi can xac nhan su co.
+So lieu Node chinh van lay tu Live data (/status).
+
+Dang chup man hinh...
+"@
+    }
+    try {
+        if (Get-Command Invoke-Screenshot -EA SilentlyContinue) {
+            Invoke-Screenshot -AnalyzeWithAI
+        } elseif (Get-Command Send-Screenshot -EA SilentlyContinue) {
+            Send-Screenshot
+        } else {
+            # fallback: try /screenshot handler path
+            $fn = Get-Command -Name 'Capture-Screenshot' -EA SilentlyContinue
+            if ($fn) { & $fn }
+            else {
+                Send-Text "Chup man hinh: dung /screenshot. Live data: /status."
+            }
+        }
+    } catch {
+        Send-Text "Khong chup duoc man hinh: $($_.Exception.Message)`nDung /screenshot hoac /status."
+    }
+}
+
+function Get-LiveLatestPath {
+    $p = Join-Path $DataDir 'PiNodeMonitorLive\latest.json'
+    if (Test-Path -LiteralPath $p) { return $p }
+    return $null
+}
+
 function Invoke-SmartMonitor {
     param([switch]$Silent)
+    # Controller CHI DOC du lieu Live Service — khong chay collector, khong load DLL
+    $latestPath = Get-LiveLatestPath
+    $hist = @(Get-NodeHistory)
 
-    if (!(Test-Path -LiteralPath $MonitorScript)) {
-        if (-not $Silent) { Send-Text "🔴 Smart Monitor khong ton tai:`n$MonitorScript" }
-        Write-Log "Smart Monitor khong ton tai: $MonitorScript"
+    if (-not $latestPath -and $hist.Count -eq 0) {
+        $msg = @"
+🔴 Chưa có dữ liệu Live Reader.
+
+👉 Chạy cảm biến nền:
+   Data\PiNodeMonitorLive_CMD_v2\Run-PiNodeMonitorLive_Service.bat
+hoặc: Install_LiveReader_Task.bat
+
+Controller không tự đo — chỉ đọc dữ liệu Live mới nhất và lịch sử NDJSON.
+"@
+        if ($Silent) { Write-Log 'Live data missing'; Send-AlertNotice $msg.Trim() } else { Send-Text $msg.Trim() }
         return $false
+    }
+
+    $last = $null
+    $ageSec = $null
+    if ($latestPath) {
+        try {
+            $last = Get-Content -LiteralPath $latestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($last.time) {
+                try { $ageSec = [math]::Round(((Get-Date) - [datetime]$last.time).TotalSeconds, 0) } catch {}
+            }
+        } catch { Write-Log "Doc latest.json loi: $($_.Exception.Message)" }
+    }
+    if (-not $last -and $hist.Count) { $last = $hist[-1] }
+    if (-not $last) {
+        $msg = '🔴 Có file dữ liệu nhưng không đọc được.'
+        if ($Silent) { Send-AlertNotice $msg } else { Send-Text $msg }
+        return $false
+    }
+
+    if ($null -ne $ageSec -and $ageSec -gt 180) {
+        if (-not $Silent) {
+            Send-Text "⚠️ Dữ liệu Live đã cũ ${ageSec}s.`nKiểm tra Live Service (Run-PiNodeMonitorLive_Service.bat)."
+        }
+        Write-Log "Live data stale age=${ageSec}s"
+    }
+
+    $problems = 0
+    try { $problems = [int]$last.problems } catch {}
+    $severity = 'OK'
+    try { if ($last.severity) { $severity = [string]$last.severity } } catch {}
+
+    if ($problems -gt 0 -or $severity -eq 'CRITICAL') {
+        if (Get-Command Get-NodeEvidenceMessage -ErrorAction SilentlyContinue) {
+            $e = Get-NodeEvidenceMessage -Record $last -Title '🚨 PI NODE — PHÁT HIỆN VẤN ĐỀ'
+            if (-not $Silent) { Send-AlertNotice $e }
+        } else {
+            if (-not $Silent) { Send-Text -Text (Get-NodeStatus) -WithKeyboard }
+        }
+        Write-Log "Live READ alert problems=$problems severity=$severity"
+        return $true
     }
 
     if (-not $Silent) {
-        Send-Text "🔍 Đang kiểm tra Node...`n⏳ Vui lòng chờ (có thể 1–2 phút)."
+        $extra = if ($null -ne $ageSec) { "`n⏱️ Dữ liệu: ${ageSec}s trước (Live Service)" } else { '' }
+        Send-Text -Text ((Get-NodeStatus) + $extra) -WithKeyboard
     } else {
-        Write-Log "Scheduler: chay Smart Monitor (im lang neu an toan)"
+        Write-Log 'Live READ OK (silent)'
     }
-
-    $before = @(Get-NodeHistory).Count
-    $out = Join-Path $env:TEMP "pinode_monitor_$PID.out.txt"
-    $err = Join-Path $env:TEMP "pinode_monitor_$PID.err.txt"
-
-    try {
-        $p = Start-Process -FilePath 'powershell.exe' `
-            -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',"`"$MonitorScript`"") `
-            -WorkingDirectory $DataDir `
-            -Wait -PassThru -WindowStyle Minimized `
-            -RedirectStandardOutput $out `
-            -RedirectStandardError $err
-
-        $code = [int]$p.ExitCode
-        $hist = @(Get-NodeHistory)
-        $new = $false
-        if ($hist.Count -gt $before) { $new = $true }
-        elseif ($hist.Count) {
-            try { $new = ([datetime]$hist[-1].time -ge (Get-Date).AddMinutes(-10)) } catch {}
-        }
-
-        if ($code -eq 0 -or $code -eq 2) {
-            if (-not $new) {
-                $d = 'Monitor ket thuc nhung khong tao ban ghi node_history moi.'
-                $ml = Join-Path $DataDir 'Monitor_Node.log'
-                if (Test-Path -LiteralPath $ml) {
-                    $d += "`n`n" + ((Get-Content -LiteralPath $ml -Tail 15 -ErrorAction SilentlyContinue) -join "`n")
-                }
-                # Day la bat thuong -> luon bao
-                Send-AlertNotice $d
-                Write-Log $d
-                return $false
-            }
-
-            $last = $hist[-1]
-            $problems = 0
-            try { $problems = [int]$last.problems } catch {}
-
-            if ($problems -gt 0) {
-                # CO VAN DE -> bao dong manh
-                Send-AlertNotice "Smart Monitor phat hien $problems van de."
-                Write-Log "Smart Monitor ALERT Exit=$code Problems=$problems"
-                return $true
-            }
-
-            # AN TOAN: chi reply khi goi thu cong
-            if (-not $Silent) {
-                Send-Text (Get-NodeStatus)
-            } else {
-                Write-Log "Smart Monitor OK (im lang) Exit=$code Problems=0"
-            }
-            return $true
-        }
-
-        # Loi thuc thi -> luon bao
-        $d = "Smart Monitor loi. ExitCode: $code`nPath: $MonitorScript"
-        if (Test-Path -LiteralPath $err) {
-            $e = (Get-Content -LiteralPath $err -Raw -ErrorAction SilentlyContinue)
-            if ($e) { $d += "`n`n$e".Trim() }
-        }
-        $ml = Join-Path $DataDir 'Monitor_Node.log'
-        if (Test-Path -LiteralPath $ml) {
-            $d += "`n`nLog:`n" + ((Get-Content -LiteralPath $ml -Tail 15 -ErrorAction SilentlyContinue) -join "`n")
-        }
-        Send-AlertNotice $d
-        Write-Log $d
-        return $false
-    } catch {
-        Send-AlertNotice "Smart Monitor loi khi khoi chay:`n$($_.Exception.Message)"
-        Write-Log "Monitor exception: $($_.Exception.Message)"
-        return $false
-    } finally {
-        Remove-Item -LiteralPath $out, $err -Force -ErrorAction SilentlyContinue
-    }
+    return $true
 }
 
 function Get-SchedulerStatus {
@@ -2587,15 +3088,15 @@ function Get-SchedulerStatus {
     $t += "🔁 Rescan khi lỗi: $($script:SchedRescanMinutes) phút`n"
     $t += "📊 Báo cáo ngày: $hours`n"
     $t += "🛠️ Bảo trì: $dayName $($script:SchedMaintTime)`n"
-    $t += "🚨 Tự reset khi lỗi liên tiếp: $auto (sau $($script:SchedStreakNeed) lần)`n"
+    $t += "🚨 Tự reset: $auto (chỉ khi lỗi liên tục >15 phút + xác nhận)`n"
     $t += "📉 Chuỗi lỗi hiện tại: $($s.problemStreak)`n`n"
     $t += "──────────────`n"
     $t += "📖 Giải thích nhanh:`n"
     $t += "• interval = chu kỳ quét khi máy ổn`n"
     $t += "• rescan = chu kỳ quét lại khi vừa phát hiện lỗi`n"
     $t += "• report = các giờ gửi báo cáo tóm tắt trong ngày`n"
-    $t += "• autoreset = chỉ reset khi đủ tín hiệu nghiêm trọng lặp lại`n"
-    $t += "• streak = số lần lỗi liên tiếp trước khi reset`n`n"
+    $t += "• autoreset = chỉ khi lỗi >15 phút liên tục + (mất Net hoặc /confirmreset), tối đa 1 lần/ngày`n"
+    $t += "• Cảnh báo: chỉ gửi sau ≥75s lỗi liên tiếp, cooldown 12 phút`n`n"
     $t += "Điều khiển (gõ đúng cú pháp):`n"
     $t += "/scheduler on|off`n"
     $t += "/scheduler interval 59     (5–1440 phút)`n"
@@ -2658,11 +3159,11 @@ function Handle-SchedulerCommand {
         }
         '^(rescan|rescane|lai|lại)$' {
             if ($val -notmatch '^\d+$') {
-                Send-Text "⚠️ Dùng: /scheduler rescan 10`n(3–180 phút)"
+                Send-Text "⚠️ Dùng: /scheduler rescan 10`n(1–180 phút)"
                 return
             }
             $n = [int]$val
-            if ($n -lt 3 -or $n -gt 180) {
+            if ($n -lt 1 -or $n -gt 180) {
                 Send-Text "⚠️ Khoảng cho phép: 3–180 phút."
                 return
             }
@@ -2827,6 +3328,7 @@ function Invoke-SchedulerTick {
             try {
                 $inN = [double]$last.incoming; $outN = [double]$last.outgoing
                 if ($inN -eq 0 -and $outN -eq 0) { $peerBad = $true; $evidenceBits += 'peers in+out=0' }
+                if($null -ne $last.peer_drop_pct -and [double]$last.peer_drop_pct -ge 50){$peerBad=$true;$evidenceBits += "peer_drop=$($last.peer_drop_pct)%"}
             } catch {}
             try {
                 if ($null -ne $last.ledger_age -and [double]$last.ledger_age -gt 60) { $ageBad = $true; $evidenceBits += "ledger_age=$($last.ledger_age)" }
@@ -2834,8 +3336,12 @@ function Invoke-SchedulerTick {
         }
 
         # Su co THUC: critical severity hoặc port/docker/sync xấu
-        $realProblem = ($severity -eq 'CRITICAL' -or $critical -gt 0 -or $syncBad -or $portBad -or $dockerBad -or $netBad -or $peerBad -or $ageBad)
-        # Reset: cần >=2 tín hiệu nặng; peer drop + sync/age cũng tính
+        $tempBad=$false;$ramBad=$false;$cpuBad=$false
+        try{if($null -ne $last.temp -and [double]$last.temp -ge ([double]$TempAlert+10)){$tempBad=$true;$evidenceBits += "temp=$($last.temp)C"}}catch{}
+        try{if($null -ne $last.ram_sys -and [double]$last.ram_sys -ge 97){$ramBad=$true;$evidenceBits += "ram=$($last.ram_sys)%"}}catch{}
+        try{if($null -ne $last.cpu_sys -and [double]$last.cpu_sys -ge 98){$cpuBad=$true;$evidenceBits += "cpu=$($last.cpu_sys)%"}}catch{}
+        $realProblem = ($severity -eq 'CRITICAL' -or $critical -gt 0 -or $syncBad -or $portBad -or $dockerBad -or $netBad -or $peerBad -or $ageBad -or $tempBad -or $ramBad -or $cpuBad)
+        # Reset chỉ khi nhiều tín hiệu liên quan, lặp lại đủ streak; tài nguyên đơn lẻ không reset.
         $severeCount = 0
         if ($syncBad) { $severeCount++ }
         if ($portBad) { $severeCount++ }
@@ -2843,46 +3349,89 @@ function Invoke-SchedulerTick {
         if ($netBad) { $severeCount++ }
         if ($peerBad) { $severeCount++ }
         if ($ageBad) { $severeCount++ }
-        $resetEligible = ($severeCount -ge 2) -or ($portBad -and $dockerBad) -or ($portBad -and $syncBad) -or ($syncBad -and $peerBad)
+        if ($tempBad) { $severeCount++ }
+        if ($ramBad) { $severeCount++ }
+        if ($cpuBad) { $severeCount++ }
+        $resetEligible = (($syncBad -and ($ageBad -or $peerBad -or $portBad -or $dockerBad)) -or ($dockerBad -and ($portBad -or $syncBad)) -or ($portBad -and ($syncBad -or $dockerBad)) -or ($severeCount -ge 3))
 
-        # Quét dày khi lỗi: rescanMin (mặc định 1 phút), tối đa 10 lần liên tiếp rồi giữ rescan nhưng không spam vô hạn
-        $maxDense = 10
+        # Quét dày khi lỗi: rescanMin (mặc định 1 phút)
+        $maxDense = if($DenseRescanMaxRuns){[int]$DenseRescanMaxRuns}else{10}
+        $alertMinDurationSec = 75   # ≥60–90s trước khi báo
+        $alertCooldownMin = 12      # cooldown 10–15 phút sau khi đã báo
+        $resetMinDurationMin = 15   # lỗi liên tục >15 phút mới xét auto-reset
+
         if ($realProblem) {
             $streak = $streak + 1
             $script:SchedulerState.problemStreak = $streak
             $script:SchedulerState.lastProblemAt = $now.ToString('o')
+            if (-not $script:SchedulerState.problemStartedAt -or [string]$script:SchedulerState.problemStartedAt -eq '') {
+                $script:SchedulerState.problemStartedAt = $now.ToString('o')
+            }
             $nextRescan = if ($streak -le $maxDense) { $rescanMin } else { [math]::Max($rescanMin, [math]::Min(5, $intervalDefault)) }
             $script:SchedulerState.nextMonitor = $now.AddMinutes($nextRescan).ToString('o')
             Save-SchedulerState $script:SchedulerState
 
-            # Chống spam: chỉ báo khi streak 1,3,5,10 hoặc đủ điều kiện reset
-            $shouldNotify = ($streak -in @(1, 3, 5, 10)) -or ($autoReset -and $resetEligible -and $streak -ge $streakNeed)
+            # Thời gian lỗi liên tục
+            $problemDurationSec = 0
+            try {
+                $started = [datetime]$script:SchedulerState.problemStartedAt
+                $problemDurationSec = [math]::Round(($now - $started).TotalSeconds, 0)
+            } catch { $problemDurationSec = 0 }
+
+            # Chống báo giả: lần đầu chỉ ghi nhận; chỉ báo khi lỗi lặp liên tiếp và kéo dài đủ lâu
+            $lastAlertAgoMin = 9999
+            try {
+                if ($script:SchedulerState.lastAlertAt) {
+                    $lastAlertAgoMin = [math]::Round(($now - [datetime]$script:SchedulerState.lastAlertAt).TotalMinutes, 1)
+                }
+            } catch {}
+            $inCooldown = ($lastAlertAgoMin -lt $alertCooldownMin)
+            $shouldNotify = ($streak -ge 2) -and ($problemDurationSec -ge $alertMinDurationSec) -and (-not $inCooldown)
             if ($shouldNotify) {
-                $reason = "Sự cố THỰC (lần $streak/$maxDense, severity=$severity). Quét lại sau $nextRescan phút.`n"
-                $reason += "Critical=$critical | SyncBad=$syncBad | PortBad=$portBad | DockerBad=$dockerBad | NetBad=$netBad | PeerBad=$peerBad | AgeBad=$ageBad`n"
-                if ($evidenceBits.Count) { $reason += "Bằng chứng: " + ($evidenceBits -join '; ') }
+                $reason = "🚨 Sự cố THỰC (kéo dài ${problemDurationSec}s, streak=$streak, severity=$severity). Quét lại sau $nextRescan phút.`n"
+                $reason += "Tín hiệu: Sync=$syncBad | Age=$ageBad | Port=$portBad | Docker=$dockerBad | Net=$netBad | Peer=$peerBad | Temp=$tempBad | RAM=$ramBad | CPU=$cpuBad`n"
+                if ($evidenceBits.Count) { $reason += "📎 Bằng chứng: " + ($evidenceBits -join '; ') }
+                $reason += "`n📊 Snapshot: Ledger=$($last.local) Age=$($last.ledger_age)s In=$($last.incoming) Out=$($last.outgoing) CPU=$($last.cpu_sys)% RAM=$($last.ram_sys)% Temp=$($last.temp)°C Docker=$($last.docker) Port=$($last.port)"
                 Send-AlertNotice $reason
+                $script:SchedulerState.lastAlertAt = $now.ToString('o')
+                Save-SchedulerState $script:SchedulerState
             } else {
-                Write-Log "Problem streak=$streak (im lang de tranh spam)"
+                Write-Log "Problem streak=$streak duration=${problemDurationSec}s (im lang: can >=${alertMinDurationSec}s + streak>=2, cooldown=${alertCooldownMin}p)"
             }
 
-            if ($autoReset -and $resetEligible -and $streak -ge $streakNeed) {
-                # Tối đa 1 lần auto-reset / ngày
+            # Auto-Reset: chỉ khi lỗi liên tục >15 phút + (mất Internet HOẶC user xác nhận /confirmreset) + tối đa 1 lần/ngày
+            # Bỏ hoàn toàn cơ chế "đủ 3 lần quét là reset"
+            $problemDurationMin = [math]::Round($problemDurationSec / 60.0, 1)
+            $hasUserConfirm = $false
+            try { $hasUserConfirm = [bool]$script:SchedulerState.pendingResetConfirm } catch {}
+            $resetConfirmOk = $netBad -or $hasUserConfirm
+            if ($autoReset -and $resetEligible -and $problemDurationMin -ge $resetMinDurationMin -and $resetConfirmOk) {
                 $resetKey = $now.ToString('yyyy-MM-dd')
                 if ([string]$script:SchedulerState.lastAutoResetKey -ne $resetKey) {
                     $script:SchedulerState.lastAutoResetKey = $resetKey
                     $script:SchedulerState.problemStreak = 0
+                    $script:SchedulerState.problemStartedAt = ''
+                    $script:SchedulerState.pendingResetConfirm = $false
                     Save-SchedulerState $script:SchedulerState
-                    Send-AlertNotice "Đủ điều kiện reset (1 lần/ngày): $severeCount tín hiệu × $streakNeed lần.`nBằng chứng: $($evidenceBits -join '; ')`nĐang TỰ ĐỘNG chạy /reset..."
+                    $confirmSrc = if ($netBad) { 'mất Internet' } else { 'user /confirmreset' }
+                    Send-AlertNotice "🚨 ĐỦ ĐIỀU KIỆN AUTO-RESET (tối đa 1 lần/ngày).`nLỗi liên tục: ${problemDurationMin} phút.`nXác nhận: $confirmSrc.`nTín hiệu nặng: $severeCount.`n📎 Bằng chứng: $($evidenceBits -join '; ')`n📊 Ledger=$($last.local) Age=$($last.ledger_age)s In=$($last.incoming) Out=$($last.outgoing) Docker=$($last.docker) Port=$($last.port)`nĐang chạy /reset..."
                     Invoke-RegisteredProgram -Key '/reset' -Silent
                 } else {
                     Write-Log "Da auto-reset hom nay ($resetKey) - bo qua"
-                    if ($streak -eq $streakNeed) {
+                    if ($problemDurationMin -ge $resetMinDurationMin -and -not $inCooldown) {
                         Send-AlertNotice "Đã auto-reset 1 lần hôm nay. Không reset thêm. Vẫn đang lỗi — hãy kiểm tra thủ công (/status /diagnostic)."
+                        $script:SchedulerState.lastAlertAt = $now.ToString('o')
+                        Save-SchedulerState $script:SchedulerState
                     }
                 }
-            } elseif ($autoReset -and $streak -ge $streakNeed -and -not $resetEligible) {
-                Write-Log "Streak=$streak nhưng chưa đủ đa điều kiện để reset (severeCount=$severeCount)"
+            } elseif ($autoReset -and $problemDurationMin -ge $resetMinDurationMin -and -not $resetConfirmOk) {
+                Write-Log "Lỗi >${resetMinDurationMin}p nhưng chưa có xác nhận (netBad=$netBad / userConfirm=$hasUserConfirm) — không auto-reset"
+                # Gợi ý user xác nhận nếu đủ điều kiện nặng
+                if ($resetEligible -and $streak -ge 3 -and -not $inCooldown) {
+                    Send-AlertNotice "⚠️ Lỗi đã kéo dài ${problemDurationMin} phút.`nĐể cho phép Auto-Reset, gửi /confirmreset hoặc đợi mất Internet.`nHoặc chạy /reset thủ công."
+                    $script:SchedulerState.lastAlertAt = $now.ToString('o')
+                    Save-SchedulerState $script:SchedulerState
+                }
             }
         } else {
             if ($streak -gt 0) {
@@ -2890,6 +3439,8 @@ function Invoke-SchedulerTick {
                 Send-Text "✅ Node đã ổn định trở lại.`nVề lịch quét mỗi $intervalDefault phút."
             }
             $script:SchedulerState.problemStreak = 0
+            $script:SchedulerState.problemStartedAt = ''
+            $script:SchedulerState.pendingResetConfirm = $false
             $script:SchedulerState.nextMonitor = $now.AddMinutes($intervalDefault).ToString('o')
             Save-SchedulerState $script:SchedulerState
         }
@@ -2903,7 +3454,7 @@ function Invoke-SchedulerTick {
         Write-Log "Scheduler: gửi báo cáo $reportKey"
         $h = @(Get-NodeHistory)
         if ($h.Count -eq 0) {
-            Send-AlertNotice "Báo cáo định kỳ: KHÔNG CÓ dữ liệu node_history.json"
+            Send-AlertNotice "Báo cáo định kỳ: chưa có dữ liệu lịch sử Live"
         } else {
             Send-Text ((Get-NodeReport) + "`n`n" + (Get-DailyDonateTip))
             $problems = 0
@@ -2941,7 +3492,7 @@ function Invoke-ShellCommand {
 
     $label = if ($ShellType -eq 'cmd') { 'CMD' } else { 'PowerShell' }
     Send-Text ("⚙️ Đang chạy {0}...`n⏳ Tối đa {1} giây." -f $label, $TimeoutSec)
-    Write-Log ("SHELL {0}: {1}" -f $label, $CommandText)
+    Write-Log ("SHELL {0}: command_received len={1}" -f $label, $CommandText.Length)
 
     $outFile = Join-Path $env:TEMP ("pinode_shell_{0}_{1}.out.txt" -f $ShellType, $PID)
     $errFile = Join-Path $env:TEMP ("pinode_shell_{0}_{1}.err.txt" -f $ShellType, $PID)
@@ -3004,6 +3555,34 @@ function Invoke-ShellCommand {
     Write-Log ("SHELL {0} Exit={1} Timeout={2} Len={3}" -f $label, $exitCode, $timedOut, $combined.Length)
 }
 
+
+function Handle-CallbackQuery {
+    param($cq)
+    if (-not $cq) { return }
+    try {
+        $data = [string]$cq.data
+        $cid = [string]$cq.id
+        $chat = $null
+        try { $chat = [string]$cq.message.chat.id } catch {}
+        if ($chat -and $chat -ne [string]$CHAT_ID) {
+            Answer-CallbackQuery -Id $cid -Text 'Unauthorized'
+            return
+        }
+        Answer-CallbackQuery -Id $cid -Text 'OK'
+        if ([string]::IsNullOrWhiteSpace($data)) { return }
+        # Gia lap tin nhan de dung lai Handle-Message
+        $fake = [pscustomobject]@{
+            message = [pscustomobject]@{
+                chat = [pscustomobject]@{ id = $CHAT_ID }
+                text = $data
+            }
+        }
+        Handle-Message $fake
+    } catch {
+        Write-Log "Callback loi: $($_.Exception.Message)"
+    }
+}
+
 function Handle-Message {
     param($m)
     if (!$m.message -or !$m.message.chat) { return }
@@ -3017,6 +3596,10 @@ function Handle-Message {
         return
     }
     if ([string]::IsNullOrWhiteSpace($text)) { return }
+    if (-not (Test-PiNodeRateLimit -Key $chat -MaxRequests 30 -WindowSeconds 60)) {
+        Write-Log "Rate limit: bo qua tin nhan tu chat whitelist $chat"
+        return
+    }
 
     # Ghi nhận tin người dùng (lệnh hoặc tự nhiên) để bộ nhớ hội thoại + phân tích sau này
     $cmdIntent = 'NATURAL'
@@ -3029,25 +3612,50 @@ function Handle-Message {
     $script:RememberReply = $true
 
     switch -Regex ($text) {
-        '(?i)^/help(@\w+)?$'       { Send-Text (Show-Help); break }
+        '(?i)^/help(@\w+)?$'       { Send-Text -Text (Show-Help) -WithKeyboard; break }
         '(?i)^/donate(@\w+)?$'     { Invoke-Donate; break }
+        '(?i)^/screenshot(@\w+)?$' { Invoke-Screenshot; break }
         '(?i)^/ask(?:@\w+)?\s+(.+)$' { Invoke-HermesQuestion -Question $Matches[1].Trim(); break }
-        '(?i)^/status(@\w+)?$'     { Send-Text (Get-NodeStatus); break }
-        '(?i)^/monitor(s)?(@\w+)?$' { Invoke-SmartMonitor; break }
+        '(?i)^/status(@\w+)?$'     { Send-Text -Text (Get-NodeStatus) -WithKeyboard; break }
+        '(?i)^/monitor(s)?(@\w+)?$' { Invoke-BackupMonitor; break }
+        '(?i)^/node(@\w+)?$'       { Send-Text -Text (Get-LiveNodeDetail) -WithKeyboard; break }
+        '(?i)^/peers(@\w+)?$'      { Send-Text -Text (Get-PeersDetail) -WithKeyboard; break }
+        '(?i)^/evidence(@\w+)?$'  {
+            $x=Get-LatestLiveRecord; if($x){Send-Text (Get-NodeEvidenceMessage -Record $x -Title '📎 PI NODE — BẰNG CHỨNG ĐO ĐƯỢC')} else {Send-Text '⚠️ Chưa có snapshot dữ liệu.'}; break
+        }
+        '(?i)^/health(@\w+)?$'    { Send-Text -Text (Get-NodeStatus) -WithKeyboard; break }
+        '(?i)^/history(@\w+)?$'   { Send-Text (Get-NodeReport -Days 30); break }
+        '(?i)^/trends(@\w+)?$'    {
+            $a=Invoke-HistoricalAIAnalysis -Question 'Phân tích xu hướng Pi Node: sync, ledger age, incoming/outgoing, nhiệt độ, CPU, RAM, Docker, port trong 7 ngày gần đây.' -Days 7
+            if($a){Send-Text $a}else{Send-Text (Get-NodeReport -Days 7)}; break
+        }
         '(?i)^/scheduler(?:@\w+)?(?:\s+(.*))?$' { Handle-SchedulerCommand -ArgsText $Matches[1]; break }
         '(?i)^/settings(?:@\w+)?(?:\s+(.*))?$' { Handle-SettingsCommand -ArgsText $Matches[1]; break }
         '(?i)^/report(@\w+)?$'     { Send-Text ((Get-NodeReport) + "`n`n" + (Get-DailyDonateTip)); break }
         '(?i)^/logs(@\w+)?$'       { Send-Text (Get-Logs); break }
         '(?i)^/docker(@\w+)?$'     { Send-Text (Get-DockerStatus); break }
         '(?i)^/disk(@\w+)?$'       { Send-Text (Get-DiskStatus); break }
-        '(?i)^/cmd(?:@\w+)?(?:\s+(.*))?$' {
-            $cmdArgs = if ($Matches.Count -gt 1 -and $Matches[1]) { $Matches[1].Trim() } else { '' }
-            Invoke-ShellCommand -ShellType 'cmd' -CommandText $cmdArgs
+        '(?i)^/(cmd|ps)(?:@\w+)?(?:\s+(.*))?$' {
+            $shellType = $Matches[1].ToLowerInvariant()
+            $shellArgs = if ($Matches.Count -gt 2 -and $Matches[2]) { $Matches[2].Trim() } else { '' }
+            if ([string]::IsNullOrWhiteSpace($shellArgs)) { Send-Text "⚠️ Dùng: /$shellType <lệnh>"; break }
+            if ($shellArgs.Length -gt 2000) { Send-Text "⚠️ Lệnh quá dài (tối đa 2000 ký tự)."; break }
+            $script:PendingShell = $true
+            $script:PendingShellAt = Get-Date
+            $script:PendingShellType = $shellType
+            $script:PendingShellCommand = $shellArgs
+            Send-Text "⚠️ LỆNH TỪ XA — XÁC NHẬN BẮT BUỘC`n━━━━━━━━━━━━━━`n[$($shellType.ToUpperInvariant())] $shellArgs`n`nĐây là quyền thực thi hệ thống.`nGửi /confirmshell trong $ConfirmTimeout giây để chạy.`nGửi /cancel để hủy."
             break
         }
-        '(?i)^/ps(?:@\w+)?(?:\s+(.*))?$' {
-            $psArgs = if ($Matches.Count -gt 1 -and $Matches[1]) { $Matches[1].Trim() } else { '' }
-            Invoke-ShellCommand -ShellType 'ps' -CommandText $psArgs
+        '(?i)^/confirmshell(@\w+)?$' {
+            if ($script:PendingShell -and $script:PendingShellAt -and ((Get-Date) - $script:PendingShellAt).TotalSeconds -le $ConfirmTimeout -and $script:PendingShellType -and $script:PendingShellCommand) {
+                $st = $script:PendingShellType; $sc = $script:PendingShellCommand
+                $script:PendingShell = $false; $script:PendingShellAt = $null; $script:PendingShellType = $null; $script:PendingShellCommand = $null
+                Invoke-ShellCommand -ShellType $st -CommandText $sc
+            } else {
+                $script:PendingShell = $false; $script:PendingShellAt = $null; $script:PendingShellType = $null; $script:PendingShellCommand = $null
+                Send-Text "⚠️ Hết thời gian xác nhận hoặc không có lệnh đang chờ."
+            }
             break
         }
         '(?i)^/insights(@\w+)?$'   {
@@ -3078,8 +3686,23 @@ function Handle-Message {
             break
         }
         '(?i)^/diagnostic(@\w+)?$' { Invoke-DiagnosticAI -UserQuestion 'Chẩn đoán hệ thống Pi Node'; break }
-        '(?i)^/cleanram(@\w+)?$'   { Invoke-RegisteredProgram '/cleanram'; break }
-        '(?i)^/screenshot(@\w+)?$' { Invoke-Screenshot; break }
+        '(?i)^/evidence(@\w+)?$'    { Invoke-LiveEvidence; break }
+        '(?i)^/cleanram(@\w+)?$'   {
+            $script:PendingCleanRam = $true
+            $script:PendingCleanRamAt = Get-Date
+            Send-Text "🧹 DỌN RAM — XÁC NHẬN`n━━━━━━━━━━━━━━`nSẽ chạy tác vụ dọn RAM/cache/DNS đã đăng ký.`nKhông tự ý đụng Pi Node/Docker theo mô tả script.`n`nGửi /confirmcleanram trong $ConfirmTimeout giây để chạy.`nGửi /cancel để hủy."
+            break
+        }
+        '(?i)^/confirmcleanram(@\w+)?$' {
+            if ($script:PendingCleanRam -and $script:PendingCleanRamAt -and ((Get-Date) - $script:PendingCleanRamAt).TotalSeconds -le $ConfirmTimeout) {
+                $script:PendingCleanRam = $false; $script:PendingCleanRamAt = $null
+                Invoke-RegisteredProgram '/cleanram'
+            } else {
+                $script:PendingCleanRam = $false; $script:PendingCleanRamAt = $null
+                Send-Text "⚠️ Hết thời gian xác nhận. Gửi lại /cleanram nếu cần."
+            }
+            break
+        }
         '(?i)^/maintenance(@\w+)?$' {
             $script:PendingMaintenance = $true
             $script:PendingMaintenanceAt = Get-Date
@@ -3143,18 +3766,59 @@ Gửi /cancel để hủy.
                 $script:PendingResetAt = $null
                 Invoke-RegisteredProgram '/reset'
             } else {
+                # Cho phép dùng /confirmreset như xác nhận cho Auto-Reset (lỗi kéo dài >15 phút)
+                $script:SchedulerState.pendingResetConfirm = $true
+                Save-SchedulerState $script:SchedulerState
                 $script:PendingReset = $false
                 $script:PendingResetAt = $null
-                Send-Text "⚠️ Het han xac nhan reset. Gui lai /reset neu can."
+                Send-Text "✅ Đã ghi nhận xác nhận /confirmreset cho Auto-Reset.`nNếu lỗi đã kéo dài >15 phút và đủ điều kiện nặng, hệ thống sẽ reset (tối đa 1 lần/ngày).`nNếu muốn reset ngay: gửi /reset rồi /confirmreset."
             }
             break
         }
 
+        '(?i)^/stopcontroller(@\w+)?$' {
+            $script:PendingStopController = $true
+            $script:PendingStopControllerAt = Get-Date
+            Send-Text @"
+🛑 TẮT CONTROLLER — XÁC NHẬN
+━━━━━━━━━━━━━━
+Sẽ dừng polling Telegram của Controller.
+Cửa sổ Live Data vẫn chạy bình thường (số liệu vẫn cập nhật).
+
+Gửi /confirmstop trong $ConfirmTimeout giây để tắt.
+Gửi /cancel để hủy.
+⏳ Đang chờ xác nhận...
+"@
+            break
+        }
+        '(?i)^/confirmstop(@\w+)?$' {
+            if ($script:PendingStopController -and $script:PendingStopControllerAt -and ((Get-Date) - $script:PendingStopControllerAt).TotalSeconds -le $ConfirmTimeout) {
+                $script:PendingStopController = $false
+                $script:PendingStopControllerAt = $null
+                Send-Text "🛑 Controller đang tắt sạch.`nCửa sổ Live Data vẫn chạy. Dùng Start_Controller.bat để bật lại."
+                Write-Log "User confirmed /confirmstop — exiting Controller"
+                Start-Sleep -Seconds 1
+                exit 0
+            } else {
+                $script:PendingStopController = $false
+                $script:PendingStopControllerAt = $null
+                Send-Text "⚠️ Hết hạn xác nhận tắt Controller. Gửi lại /stopcontroller nếu cần."
+            }
+            break
+        }
         '(?i)^/cancel(@\w+)?$' {
             $script:PendingMaintenance = $false
             $script:PendingMaintenanceAt = $null
+            $script:PendingCleanRam = $false
+            $script:PendingCleanRamAt = $null
+            $script:PendingShell = $false
+            $script:PendingShellAt = $null
+            $script:PendingShellType = $null
+            $script:PendingShellCommand = $null
             $script:PendingReset = $false
             $script:PendingResetAt = $null
+            $script:PendingStopController = $false
+            $script:PendingStopControllerAt = $null
             Send-Text "✅ Đã hủy thao tác đang chờ."
             break
         }
@@ -3166,7 +3830,91 @@ Gửi /cancel để hủy.
     }
 }
 
+
+function Test-LiveReaderRunning {
+    try {
+        $pidFile = Join-Path $DataDir 'PiNodeMonitorLive\live_service.pid'
+        if (Test-Path -LiteralPath $pidFile) {
+            $pidVal = 0
+            try { $pidVal = [int]((Get-Content -LiteralPath $pidFile -Raw).Trim()) } catch {}
+            if ($pidVal -gt 0) {
+                $proc = Get-Process -Id $pidVal -ErrorAction SilentlyContinue
+                if ($proc) { return $true }
+            }
+        }
+        $hit = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -match 'PiNodeMonitorLive(\.ps1|_Service\.ps1)' } |
+            Select-Object -First 1
+        return [bool]$hit
+    } catch { return $false }
+}
+
+function Ensure-LiveReaderRunning {
+    # Tu khoi dong Live Reader voi quyen cao (Task Scheduler HIGHEST / admin)
+    if (Test-LiveReaderRunning) {
+        Write-Log 'Live Reader: dang chay'
+        return $true
+    }
+    $svc = Join-Path $DataDir 'PiNodeMonitorLive_CMD_v2\PiNodeMonitorLive_Service.ps1'
+    if (!(Test-Path -LiteralPath $svc)) {
+        Write-Log "Live Reader: khong thay $svc"
+        return $false
+    }
+    $taskName = 'PiNodeMonitorLive_Service'
+    try {
+        # Thu chay task da cai
+        $q = & schtasks.exe /Query /TN $taskName 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            & schtasks.exe /Run /TN $taskName 2>$null | Out-Null
+            Start-Sleep -Seconds 2
+            if (Test-LiveReaderRunning) {
+                Write-Log 'Live Reader: da chay qua Task Scheduler'
+                return $true
+            }
+        } else {
+            # Tao task chay ONLOGON + HIGHEST (admin), roi Run ngay
+            $tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$svc`""
+            & schtasks.exe /Create /TN $taskName /TR $tr /SC ONLOGON /RL HIGHEST /F 2>$null | Out-Null
+            & schtasks.exe /Run /TN $taskName 2>$null | Out-Null
+            Start-Sleep -Seconds 3
+            if (Test-LiveReaderRunning) {
+                Write-Log 'Live Reader: da tao task admin + chay'
+                return $true
+            }
+        }
+    } catch {
+        Write-Log "Live Reader schtasks loi: $($_.Exception.Message)"
+    }
+    # Fallback: start process (co the khong admin neu Controller khong elevated)
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = 'powershell.exe'
+        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$svc`""
+        $psi.UseShellExecute = $true
+        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+        # Thu elevate neu Controller dang admin
+        try {
+            $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $p = New-Object Security.Principal.WindowsPrincipal($id)
+            if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+                $psi.Verb = 'runas'
+            }
+        } catch {}
+        [void][System.Diagnostics.Process]::Start($psi)
+        Start-Sleep -Seconds 2
+        if (Test-LiveReaderRunning) {
+            Write-Log 'Live Reader: started via Process'
+            return $true
+        }
+    } catch {
+        Write-Log "Live Reader start loi: $($_.Exception.Message)"
+    }
+    Write-Log 'Live Service chưa chạy — hãy khởi động bằng Start_Controller.bat.'
+    return $false
+}
+
 Write-Log "Controller v2.0 khoi dong. PID=$PID"
+if ($env:PINODE_UNIFIED_HOST -eq '1' -or $env:PINODE_LIVE_EXTERNAL -eq '1') { Write-Log 'Live Data is managed externally by Start_Controller; Controller will not start another reader.' } else { try { Ensure-LiveReaderRunning | Out-Null } catch { Write-Log "Ensure-LiveReader loi: $($_.Exception.Message)" } }
 try {
   foreach ($k in @($REGISTERED.Keys)) {
     $rp = [string]$REGISTERED[$k]
@@ -3190,7 +3938,8 @@ Bot giúp bạn giám sát • bảo trì • xử lý sự cố Pi Node trực 
 
 📊 GIÁM SÁT
 /status — Trạng thái Node
-/monitor — Kiểm tra chuyên sâu
+/monitor — Dự phòng: ảnh màn hình
+/node · /peers — Chi tiết Node & peer
 /report — Báo cáo hệ thống
 /scheduler — Xem & chỉnh lịch tự động
 
@@ -3202,14 +3951,14 @@ Bot giúp bạn giám sát • bảo trì • xử lý sự cố Pi Node trực 
 /cancel — Hủy thao tác
 
 🖥️ HỆ THỐNG
-/docker · /disk · /logs · /screenshot
+/docker · /disk · /logs · /evidence
 
 💬 /ask · /help · /donate
 
 ━━━━━━━━━━━━━━
 
 ⚙️ TỰ ĐỘNG HÓA
-• Kiểm tra Node mỗi 60 phút
+• Kiểm tra Node mỗi 5 phút
 • Phát hiện lỗi → cảnh báo Telegram
 • Lỗi đồng bộ / port lặp lại → tự xử lý
 • Báo cáo lúc 07:00 & 18:00
@@ -3217,7 +3966,7 @@ Bot giúp bạn giám sát • bảo trì • xử lý sự cố Pi Node trực 
 🔐 An toàn • Tự động • Ổn định
 
 "@
-    Send-Text $intro
+    Send-Text -Text $intro -WithKeyboard
     Start-Sleep -Milliseconds 500
     Invoke-Donate
     try {
@@ -3225,22 +3974,23 @@ Bot giúp bạn giám sát • bảo trì • xử lý sự cố Pi Node trực 
       Set-Content -LiteralPath $welcomeFlag -Value (Get-Date).ToString('o') -Encoding UTF8
     } catch {}
   } else {
-    Send-Text "🟢 Pi Node Controller đang giám sát hệ thống của bạn.`n/status · /monitor · /help"
+    Send-Text -Text "🟢 Pi Node Controller đang bảo vệ Node của bạn.`n━━━━━━━━━━━━━━━━`nDữ liệu live được cập nhật nền. Dùng nút bên dưới hoặc /status · /help" -WithKeyboard
   }
 } catch {
-  Send-Text "🟢 Controller sẵn sàng · /help"
+  Send-Text -Text "🟢 Controller sẵn sàng · /help" -WithKeyboard
   Write-Log "Welcome loi: $($_.Exception.Message)"
 }
 
 while ($true) {
     try {
         Invoke-SchedulerTick
-        $body = @{ timeout=$POLL_TIMEOUT; offset=$script:Offset; allowed_updates='message' }
+        $body = @{ timeout=$POLL_TIMEOUT; offset=$script:Offset; allowed_updates=@('message','callback_query') }
         $r = Invoke-Telegram 'getUpdates' $body ($POLL_TIMEOUT + 10)
         if ($r -and $r.ok -and $r.result) {
             foreach ($u in $r.result) {
                 $script:Offset = [int64]$u.update_id + 1
-                if ($u.message) { Handle-Message $u }
+                if ($u.callback_query) { Handle-CallbackQuery $u.callback_query }
+                elseif ($u.message) { Handle-Message $u }
             }
         }
     } catch {
@@ -3248,3 +3998,4 @@ while ($true) {
         Start-Sleep -Seconds 5
     }
 }
+
