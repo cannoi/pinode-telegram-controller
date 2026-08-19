@@ -2,7 +2,12 @@
 
 Dung lam nguon kien thuc cho AI. Knowledge Base chinh duoc nhung vao Controller de khong phu thuoc file ngoai.
 
-Muc dich: quan ly Pi Node qua Telegram; monitor, report, diagnostic, Docker, disk, screenshot, clean RAM, maintenance, reset va AI.
+Muc dich: quan ly Pi Node qua Telegram; monitor, report, diagnostic, Docker, disk, evidence, clean RAM, maintenance, reset va AI.
+KIEN TRUC V12 (QUAN TRONG):
+- PiNodeMonitorLive_Service chay NEN doc lap, ghi Data/PiNodeMonitorLive/latest.json + node_history.json.
+- Controller /monitor /status CHI DOC file do — khong chay collector, khong load DLL.
+- Thieu du lieu = N/A. Cam suy doan. Canh bao phai co source + timestamp + evidence.
+- Cai Live: Install_LiveReader_Task.bat hoac Run-PiNodeMonitorLive_Service.bat.
 
 NGUON DU LIEU (QUAN TRONG):
 - Smart Monitor v10 doc TRUC TIEP: stellar-core (docker exec http-command info/peers), Docker info/ps/stats, Win32 CPU/RAM/disk, port 31401-31403, OpenHardwareMonitorLib (nhiet do).
@@ -30,7 +35,7 @@ Start/Stop_Controller = bat/tat Controller.
 
 Cai dat: Setup_Config -> Check_Installation -> Start_Controller -> /help /status /monitor -> tuy chon Install_Controller_Task.
 
-Natural language: STATUS, MONITOR, REPORT, DOCKER, DISK, SCREENSHOT, LOGS, SCHEDULER, DIAGNOSTIC, CLEANRAM, MAINTENANCE_CONFIRM, RESET_CONFIRM, ASK_HERMES, KNOWLEDGE.
+Natural language: STATUS, MONITOR, REPORT, DOCKER, DISK, EVIDENCE, LOGS, SCHEDULER, DIAGNOSTIC, CLEANRAM, MAINTENANCE_CONFIRM, RESET_CONFIRM, ASK_HERMES, KNOWLEDGE.
 
 Huong dan nguoi dung: ngan, ro, uu tien /status /monitor /report /diagnostic /scheduler. Khong doan du lieu may. Khong tu y reset/maintenance. Khong tiet lo secret.
 

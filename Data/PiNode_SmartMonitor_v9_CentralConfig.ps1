@@ -1,5 +1,5 @@
-# PI NODE SMART MONITOR v10.0 — Live Data Collector (read-only)
-# Thay thế OCR/chụp màn hình bằng stellar-core + Docker + hệ thống + cảm biến.
+﻿# PI NODE SMART MONITOR v11.0 — Smart Evidence Live Data Collector (read-only)
+# Thay thế OCR/chụp màn hình bằng stellar-core + Docker + Windows/CIM + OpenHardwareMonitorLib.
 # Nguyên tắc: chỉ dữ liệu thật, không suy đoán, không bịa số 0 giả.
 # Windows PowerShell 5.1 — portable theo thư mục Data/
 
@@ -14,11 +14,11 @@ $CONFIG_FILE = Join-Path $APP_ROOT 'Config\PiNode_Config.ps1'
 
 if (!(Test-Path -LiteralPath $CONFIG_FILE)) {
     Write-Host "LOI: Khong tim thay Config trung tam: $CONFIG_FILE" -ForegroundColor Red
-    exit 20
+    throw "Khong tim thay Config trung tam: $CONFIG_FILE"
 }
 try { . $CONFIG_FILE } catch {
     Write-Host "LOI: Khong nap duoc Config: $($_.Exception.Message)" -ForegroundColor Red
-    exit 21
+    throw "Khong nap duoc Config: $($_.Exception.Message)"
 }
 
 $BOT_TOKEN      = $BotToken
@@ -31,12 +31,24 @@ $LEDGER_AGE_MAX = if ($LedgerAgeMaxSec) { [int]$LedgerAgeMaxSec } else { 30 }
 $DISK_FREE_MIN  = if ($DiskFreeMinGB) { [double]$DiskFreeMinGB } else { 20 }
 $HISTORY_MAX    = if ($NodeHistoryMaxRecords) { [int]$NodeHistoryMaxRecords } else { 2500 }
 $DISK_SAMPLE_MINUTES = if ($DiskSampleMinutes) { [int]$DiskSampleMinutes } else { 30 }
+$VHDX_SAMPLE_MINUTES = if ($VhdxSampleMinutes) { [int]$VhdxSampleMinutes } else { 30 }
+$ARCHIVE_DAYS = if ($NodeHistoryArchiveDays) { [int]$NodeHistoryArchiveDays } else { 45 }
+$ARCHIVE_MAX_MB = if ($NodeHistoryArchiveMaxMB) { [int]$NodeHistoryArchiveMaxMB } else { 200 }
+$PEER_DROP_PERCENT = if ($PeerDropPercent) { [double]$PeerDropPercent } else { 50 }
+$PEER_BASELINE_MIN = if ($PeerBaselineMin) { [int]$PeerBaselineMin } else { 4 }
 
 $HISTORY_DIR = Join-Path $BASE_DIR 'History\ScreenMonitor'
 $LOGFILE     = Join-Path $BASE_DIR 'Monitor_Node.log'
 $DATA_FILE   = Join-Path $BASE_DIR 'node_history.json'
 $COLLECTOR_STATE = Join-Path $BASE_DIR 'collector_state.json'
+$ARCHIVE_DIR = Join-Path $BASE_DIR 'History\Node'
+New-Item -ItemType Directory -Path $ARCHIVE_DIR -Force -ErrorAction SilentlyContinue | Out-Null
 $DLL_PATH    = Join-Path $BASE_DIR 'OpenHardwareMonitorLib.dll'
+
+# Collector chạy read-only trong chính process/token của Controller.
+# Không OCR, không chụp màn hình, không tự sửa Node.
+$script:IsAdministrator = $false
+try { $script:IsAdministrator = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch {}
 New-Item -ItemType Directory -Path $HISTORY_DIR -Force -ErrorAction SilentlyContinue | Out-Null
 
 function Write-Log {
@@ -96,6 +108,9 @@ function Read-CollectorState {
         lastAlertAt = $null
         alertCountToday = 0
         alertDay = ''
+        lastPiContainer = $null
+        lastVhdxSample = $null
+        lastVhdx = $null
     }
     if (!(Test-Path -LiteralPath $COLLECTOR_STATE)) { return $defaults }
     try {
@@ -141,42 +156,134 @@ function Invoke-External {
     } catch { return $null }
 }
 
+function Test-StellarCoreContainer {
+    param([string]$DockerExe, [string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    $raw = Invoke-External $DockerExe @('exec', $Name, 'stellar-core', 'http-command', 'info') 8000
+    if (-not $raw) { return $false }
+    return ($raw.IndexOf('{') -ge 0)
+}
+
+function Resolve-PiContainer {
+    param(
+        [string]$DockerExe,
+        [array]$Containers,
+        [string]$PreferredName
+    )
+    if ($PreferredName) {
+        $hit = @($Containers | Where-Object { $_.name -eq $PreferredName } | Select-Object -First 1)
+        if ($hit -and (Test-StellarCoreContainer -DockerExe $DockerExe -Name $PreferredName)) { return $PreferredName }
+        if (Test-StellarCoreContainer -DockerExe $DockerExe -Name $PreferredName) { return $PreferredName }
+    }
+    $nameHints = @('testnet2', 'testnet', 'pi-node', 'pinode', 'pi_node', 'pi-network', 'mainnet')
+    foreach ($hint in $nameHints) {
+        $c = @($Containers | Where-Object { $_.name -eq $hint -or $_.name -match [regex]::Escape($hint) } | Select-Object -First 1)
+        if ($c -and (Test-StellarCoreContainer -DockerExe $DockerExe -Name $c.name)) { return [string]$c.name }
+    }
+    $imgHits = @($Containers | Where-Object { $_.image -match 'pi-node|pinode|pi.network|pi-network|stellar|testnet' })
+    foreach ($c in $imgHits) {
+        if (Test-StellarCoreContainer -DockerExe $DockerExe -Name $c.name) { return [string]$c.name }
+    }
+    $probed = 0
+    foreach ($c in $Containers) {
+        if ($probed -ge 12) { break }
+        $probed++
+        if (Test-StellarCoreContainer -DockerExe $DockerExe -Name $c.name) { return [string]$c.name }
+    }
+    return $null
+}
+
+function Convert-SizeToGB {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $m=[regex]::Match($Text,'([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB|TB)',[System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if(-not $m.Success){return $null}
+    $v=[double]$m.Groups[1].Value
+    switch($m.Groups[2].Value.ToUpperInvariant()){
+        'TB'{return [math]::Round($v*1024,2)} 'GB'{return [math]::Round($v,2)} 'MB'{return [math]::Round($v/1024,2)} 'KB'{return [math]::Round($v/1048576,2)} default{return [math]::Round($v/1073741824,3)}
+    }
+}
+function Get-VhdxLive {
+    $files=@()
+    try {
+        $paths=@((Join-Path $env:LOCALAPPDATA 'Docker'),(Join-Path $env:LOCALAPPDATA 'Packages'))
+        $files=@(Get-ChildItem $paths -Filter '*.vhdx' -Recurse -File -ErrorAction SilentlyContinue | Sort-Object Length -Descending | Select-Object -First 10 | ForEach-Object {[pscustomobject]@{name=$_.Name;path=$_.FullName;size_gb=[math]::Round($_.Length/1GB,2)}})
+    } catch {}
+    return [ordered]@{available=($files.Count -gt 0);files=$files;largest_gb=if($files.Count){$files[0].size_gb}else{$null}}
+}
+function Save-LongTermRecord {
+    param($Record)
+    try {
+        $file=Join-Path $ARCHIVE_DIR ("NodeHistory_{0}.ndjson" -f (Get-Date $Record.time).ToString('yyyy-MM-dd'))
+        ($Record | ConvertTo-Json -Depth 15 -Compress) | Add-Content -LiteralPath $file -Encoding UTF8
+        $cut=(Get-Date).AddDays(-$ARCHIVE_DAYS)
+        Get-ChildItem $ARCHIVE_DIR -Filter 'NodeHistory_*.ndjson' -File -ErrorAction SilentlyContinue | Where-Object {$_.LastWriteTime -lt $cut} | Remove-Item -Force -ErrorAction SilentlyContinue
+        $total=(Get-ChildItem $ARCHIVE_DIR -Filter 'NodeHistory_*.ndjson' -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+        if($total -gt ($ARCHIVE_MAX_MB*1MB)){Get-ChildItem $ARCHIVE_DIR -Filter 'NodeHistory_*.ndjson' -File | Sort-Object LastWriteTime | Select-Object -First 1 | Remove-Item -Force -ErrorAction SilentlyContinue}
+    } catch { Write-Log "Archive history loi: $($_.Exception.Message)" }
+}
+
 function Get-DockerLive {
+    param([string]$PreferredContainer = $null)
     $docker = $null
     try { $docker = (Get-Command docker -ErrorAction SilentlyContinue).Source } catch {}
     if (-not $docker) {
-        return [ordered]@{ available = $false; engine = 'STOPPED'; pi_container = $null; containers = @(); info = $null; pi_stats = $null }
+        return [ordered]@{
+            available = $false; engine = 'STOPPED'; pi_container = $null
+            containers = @(); info = $null; pi_stats = $null; container_names = @()
+        }
     }
-    $info = Invoke-External $docker @('info', '--format', 'Server={{.ServerVersion}}|Containers={{.Containers}}|Running={{.ContainersRunning}}|Images={{.Images}}')
+    $info = Invoke-External $docker @('info', '--format', '{{.ServerVersion}}')
     $ps = Invoke-External $docker @('ps', '--format', '{{.Names}}|{{.Image}}|{{.Status}}')
     $containers = @()
     if ($ps) {
         foreach ($line in ($ps -split "`r?`n")) {
             if ($line.Trim()) {
                 $x = $line -split '\|', 3
-                $containers += [pscustomobject]@{ name = $x[0]; image = $x[1]; status = $x[2] }
+                $containers += [pscustomobject]@{
+                    name   = $x[0].Trim()
+                    image  = if ($x.Count -gt 1) { $x[1].Trim() } else { '' }
+                    status = if ($x.Count -gt 2) { $x[2].Trim() } else { '' }
+                }
             }
         }
     }
-    $testnet = $containers | Where-Object { $_.name -eq 'testnet2' -or $_.image -match 'pi-node-docker' } | Select-Object -First 1
+    if ($containers.Count -eq 0) {
+        $psRaw = Invoke-External $docker @('ps', '--no-trunc')
+        if ($psRaw) {
+            foreach ($line in @($psRaw -split "`r?`n" | Select-Object -Skip 1)) {
+                if (-not $line.Trim()) { continue }
+                $parts = $line -split '\s{2,}'
+                $name = $parts[-1]
+                if ($name) { $containers += [pscustomobject]@{ name = $name.Trim(); image = ''; status = 'Up' } }
+            }
+        }
+    }
+
+    $piName = Resolve-PiContainer -DockerExe $docker -Containers $containers -PreferredName $PreferredContainer
     $stats = $null
-    if ($testnet) {
-        $s = Invoke-External $docker @('stats', $testnet.name, '--no-stream', '--format', 'CPU={{.CPUPerc}}|RAM={{.MemUsage}}|RAMP={{.MemPerc}}|NET={{.NetIO}}|BLOCK={{.BlockIO}}|PIDS={{.PIDs}}')
+    if ($piName) {
+        $s = Invoke-External $docker @('stats', $piName, '--no-stream', '--format', 'CPU={{.CPUPerc}}|RAM={{.MemUsage}}|RAMP={{.MemPerc}}|NET={{.NetIO}}|BLOCK={{.BlockIO}}|PIDS={{.PIDs}}')
         if ($s) {
             $stats = [ordered]@{}
             foreach ($v in ($s.Trim() -split '\|')) {
                 $kv = $v -split '=', 2
                 if ($kv.Count -eq 2) { $stats[$kv[0]] = $kv[1] }
             }
+            if($stats.Contains('NET')){
+                $n=@($stats['NET'] -split '\s*/\s*')
+                if($n.Count -eq 2){$stats['NET_RX_GB']=Convert-SizeToGB $n[0];$stats['NET_TX_GB']=Convert-SizeToGB $n[1]}
+            }
         }
     }
     [ordered]@{
-        available    = $true
-        engine       = 'RUNNING'
-        info         = $info
-        containers   = $containers
-        pi_container = if ($testnet) { $testnet.name } else { $null }
-        pi_stats     = $stats
+        available       = $true
+        engine          = 'RUNNING'
+        info            = $info
+        containers      = $containers
+        container_names = @($containers | ForEach-Object { $_.name })
+        pi_container    = $piName
+        pi_stats        = $stats
     }
 }
 
@@ -271,7 +378,9 @@ function Get-TemperatureLive {
             return [ordered]@{
                 available  = $true
                 source     = 'OpenHardwareMonitorLib'
-                package_c  = [math]::Round((($packages | Measure-Object -Average).Average), 1)
+                package_c      = [math]::Round((($packages | Measure-Object -Maximum).Maximum), 1)
+                package_min_c  = [math]::Round((($packages | Measure-Object -Minimum).Minimum), 1)
+                package_max_c  = [math]::Round((($packages | Measure-Object -Maximum).Maximum), 1)
                 min_c      = if ($cores.Count) { [math]::Round((($cores.temp_c | Measure-Object -Minimum).Minimum), 1) } else { $null }
                 max_c      = if ($cores.Count) { [math]::Round((($cores.temp_c | Measure-Object -Maximum).Maximum), 1) } else { $null }
                 cores      = $cores
@@ -362,7 +471,22 @@ if ($cstate.lastDiskSample -and $cstate.lastDisk) {
     } catch { $needDisk = $true }
 }
 
-$dock = Get-DockerLive
+# Ưu tiên: Config $PiContainerName → state đã học → auto-discover stellar-core
+$preferredPi = $null
+if ($PiContainerName) { $preferredPi = [string]$PiContainerName }
+elseif ($cstate.lastPiContainer) { $preferredPi = [string]$cstate.lastPiContainer }
+
+$needVhdx=$true; $vhdx=$null
+if($cstate.lastVhdxSample -and $cstate.lastVhdx){try{if((($Now-[datetime]$cstate.lastVhdxSample).TotalMinutes)-lt $VHDX_SAMPLE_MINUTES){$needVhdx=$false;$vhdx=$cstate.lastVhdx}}catch{}}
+if($needVhdx){$vhdx=Get-VhdxLive;$cstate.lastVhdxSample=$Now.ToString('o');$cstate.lastVhdx=$vhdx}
+
+$dock = Get-DockerLive -PreferredContainer $preferredPi
+if ($dock.pi_container) {
+    $cstate.lastPiContainer = [string]$dock.pi_container
+    Write-Log "Pi container: $($dock.pi_container)"
+} else {
+    Write-Log ("Pi container: KHONG TIM THAY. Dang chay: " + ((@($dock.container_names) -join ', ')))
+}
 $pi   = Get-PiCoreLive -Container $dock.pi_container
 $temp = Get-TemperatureLive
 $sys  = Get-SystemLive -CachedDisk $(if ($needDisk) { $null } else { $cachedDisk })
@@ -423,6 +547,8 @@ $Evidence += "ports listening=$portOpen/$portTotal"
 $cDrive = @($sys.disk | Where-Object { $_.name -eq 'C:' } | Select-Object -First 1)
 if ($cDrive) { $FreeGB = $cDrive.free_gb }
 
+if($null -ne $sys.vmmem_gb){$Evidence += "vmmem=$($sys.vmmem_gb)GB"}
+if($vhdx -and $vhdx.available){$Evidence += "Docker VHDX largest=$($vhdx.largest_gb)GB"}
 $Critical = @()
 $Warnings = @()
 $SoftIssues = @()
@@ -432,7 +558,15 @@ if (-not $dock.available) {
     $Critical += 'Docker engine khong kha dung (docker info that bai)'
 }
 if ($dock.available -and -not $dock.pi_container) {
-    $Critical += 'Khong tim thay container Pi Node (testnet2 / pi-node-docker)'
+    $names = @($dock.container_names)
+    if ($names.Count -gt 0) {
+        $Critical += "Khong tim thay container co stellar-core. Container dang chay: $($names -join ', '). Dat `$PiContainerName='ten' trong Config neu can."
+    } else {
+        $Critical += 'Docker RUNNING nhung khong co container nao dang chay (docker ps rong). Hay mo Pi Node / start container.'
+    }
+}
+if ($dock.available -and $dock.pi_container -and -not $pi.available) {
+    $Critical += "Co container '$($dock.pi_container)' nhung stellar-core http-command info that bai (Node chua san sang?)"
 }
 if ($pi.available -and -not $pi.synced) {
     $Critical += "Node chua Synced (state=$($pi.state), ledger_age=$($pi.ledger.age))"
@@ -473,8 +607,9 @@ try {
         if ($null -ne $pIn -and $null -ne $pOut) {
             $sumPrev = $pIn + $pOut
             $sumNow = $cIn + $cOut
-            if ($sumPrev -ge 4 -and $sumNow -lt ($sumPrev * 0.5)) {
-                $peerDropNote = "Peer sut giam bat thuong: In+Out $sumPrev -> $sumNow (mau truoc -> hien tai)"
+            $dropPct=if($sumPrev -gt 0){[math]::Round(100*(1-($sumNow/$sumPrev)),0)}else{0}
+            if ($sumPrev -ge $PEER_BASELINE_MIN -and $dropPct -ge $PEER_DROP_PERCENT) {
+                $peerDropNote = "Peer sut giam bat thuong: In+Out $sumPrev -> $sumNow (giam $dropPct%)"
                 $Warnings += $peerDropNote
                 $Evidence += $peerDropNote
             } elseif ($sumPrev -eq 0 -and $sumNow -ge 2) {
@@ -543,6 +678,8 @@ if ($SoftIssues.Count) { Write-Log "SoftIssues: $($SoftIssues -join '; ')" }
 Save-CollectorState $cstate
 
 $History = @(Load-History)
+$peerDelta=$null;$peerDropPct=$null
+try{if($History.Count -gt 0 -and $In -ne 'N/A' -and $Out -ne 'N/A'){$pr=$History[-1];$pt=[double]$pr.incoming+[double]$pr.outgoing;$ct=[double]$In+[double]$Out;if($pt -gt 0){$peerDelta=[math]::Round($ct-$pt,0);$peerDropPct=[math]::Round(100*(1-($ct/$pt)),0)}}}catch{}
 $History += [ordered]@{
     time       = $Now.ToString('o')
     sync       = $SyncStatus
@@ -551,6 +688,9 @@ $History += [ordered]@{
     outgoing   = $Out
     incoming   = $In
     temp       = $TempVal
+    temp_min   = if($temp.available){$temp.min_c}else{$null}
+    temp_max   = if($temp.available){$temp.package_max_c}else{$null}
+    temp_source= if($temp.available){$temp.source}else{$null}
     ram_sys    = $RAM
     cpu_sys    = $CPU
     internet   = $Net
@@ -564,6 +704,7 @@ $History += [ordered]@{
     critical   = $CriticalCount
     severity   = $Severity
     source     = 'stellar-core+docker+ohm'
+    administrator = $script:IsAdministrator
     # extended (controller co the bo qua neu chua biet)
     ledger_age     = $LedgerAge
     quorum_phase   = $QuorumPhase
@@ -575,10 +716,23 @@ $History += [ordered]@{
     critical_list  = $Critical
     warning_list   = $Warnings
     peers_auth     = if ($pi.available) { $pi.peers.authenticated } else { $null }
+    peer_total     = if ($pi.available) { [int]$pi.peers.incoming + [int]$pi.peers.outgoing } else { $null }
+    peer_delta     = $peerDelta
+    peer_drop_pct  = $peerDropPct
     protocol       = if ($pi.available) { $pi.protocol_version } else { $null }
     build          = if ($pi.available) { $pi.build } else { $null }
+    quorum_agree   = if ($pi.available) { $pi.quorum.agree } else { $null }
+    quorum_disagree= if ($pi.available) { $pi.quorum.disagree } else { $null }
+    quorum_missing = if ($pi.available) { $pi.quorum.missing } else { $null }
+    quorum_intersection = if ($pi.available) { $pi.quorum.intersection } else { $null }
+    quorum_nodes   = if ($pi.available) { $pi.quorum.node_count } else { $null }
+    docker_server  = $dock.info
+    docker_pi_stats= $dock.pi_stats
+    vmmem_gb       = $sys.vmmem_gb
+    vhdx            = $vhdx
 }
 Save-History $History
+Save-LongTermRecord $History[-1]
 
 # Bao cao 7h/18h neu MonitorSelfNotify
 $Hour = [int]$Now.Hour
@@ -628,7 +782,7 @@ Mang: $Net ($Ping)
 
 $(if ($Problems.Count) { "Van de luc nay:`n" + (($Problems | ForEach-Object { "- $_" }) -join "`n") } else { 'Hien tai khong phat hien su co.' })
 
-Smart Monitor v10 Live (khong OCR)
+Smart Monitor Live (stellar-core + Docker + OHM, khong OCR/chup anh)
 "@
     Send-Telegram $report.Trim()
 }

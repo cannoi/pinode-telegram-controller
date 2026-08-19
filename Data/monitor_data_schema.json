@@ -1,27 +1,42 @@
 {
-  "version": "1.0",
-  "principles": [
-    "portable",
-    "read_only",
-    "source_aware",
-    "no_fake_zero",
-    "ai_filterable"
+  "version": "2.0",
+  "principles": ["portable","read_only","source_aware","no_fake_zero","evidence_first","ai_filterable"],
+  "collection": {
+    "normal_minutes": 5,
+    "problem_rescan_seconds": 60,
+    "problem_rescan_max_runs": 10,
+    "disk_minutes": 30,
+    "vhdx_minutes": 30,
+    "archive_days": 45
+  },
+  "sources": [
+    "stellar-core http-command info/peers",
+    "Docker info/ps/stats",
+    "Windows CIM/NetTCP",
+    "OpenHardwareMonitorLib.dll"
   ],
   "fields": [
-    "timestamp",
-    "system",
-    "temperature",
-    "docker",
-    "pi_node",
-    "health"
+    "timestamp","sync","ledger","ledger_age","incoming","outgoing","peer_trend",
+    "quorum","temperature","cpu","ram","disk","vmmem","docker","docker_stats",
+    "vhdx","internet","ports","pi_desktop","evidence","problems","severity"
   ],
   "temperature": {
-    "source": "OpenHardwareMonitorLib|other|null",
-    "available": "boolean"
+    "source": "OpenHardwareMonitorLib|null",
+    "available": "boolean",
+    "package_c": "number|null",
+    "package_min_c": "number|null",
+    "package_max_c": "number|null",
+    "core_min_c": "number|null",
+    "core_max_c": "number|null"
   },
   "ai": {
-    "input": "normalized JSON",
-    "output": "alerts + explanation + confidence",
+    "input": "normalized measured evidence + history",
+    "output": "interpretation only; every numeric claim must be traceable to evidence",
     "no_mutation": true
+  },
+  "auto_reset": {
+    "max_per_day": 1,
+    "requires_repeated_evidence": true,
+    "resource_only_is_not_sufficient": true
   }
 }
