@@ -1,12 +1,14 @@
-{
+﻿{
   "help": "Show command list",
-  "status": "Read latest node_history.json",
-  "monitor": "Run Smart Monitor now",
+  "status": "Read latest live evidence from latest.json",
+  "monitor": "Xác minh dự phòng: ảnh + Gemini Vision đối chiếu Live Data; chỉ chạy khi cần xác nhận sự cố.",
   "monitors": "Alias of /monitor",
+  "node": "Detailed live Node metrics with evidence from normalized history",
+  "peers": "Peer In/Out + trend/drop evidence",
   "report": "Build 24-hour report from history",
   "diagnostic": "Run diagnostic module",
   "cleanram": "Run CleanRAM module",
-  "screenshot": "Capture desktop and send photo",
+  "screenshot": "Capture: chụp Pi Desktop/cửa sổ Node để người dùng xem; không thay thế Live Data.",
   "logs": "Read recent logs",
   "docker": "Check Docker",
   "disk": "Check C: drive",
@@ -15,5 +17,11 @@
   "confirm": "Confirm maintenance",
   "cancel": "Cancel pending maintenance",
   "ask": "Ask Hermes",
-  "insights": "Chat interaction insights for future app upgrades"
+  "insights": "Chat interaction insights for future app upgrades",
+  "evidence": "Show latest measured evidence used for alerts/AI",
+  "health": "Explain Node health from measured evidence; no guessing",
+  "history": "Read retained Live NDJSON history (raw 7 days, hourly 30 days, daily 1 year)",
+  "trends": "Analyze peer/ledger/temp/RAM/CPU trends from stored measurements",
+  "settings": "Cài đặt container Pi Node, chế độ báo động và phong cách trả lời.",
+  "alert": "Bật/tắt báo động hoặc tắt ban đêm qua /settings alert on|off|night."
 }
