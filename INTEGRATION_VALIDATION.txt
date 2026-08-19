@@ -1,0 +1,9 @@
+{
+  "controller_has_inprocess_monitor": true,
+  "controller_has_admin_gate": true,
+  "controller_has_screenshot_function": true,
+  "controller_has_screenshot_route": true,
+  "collector_has_ohm": true,
+  "collector_has_admin_evidence": true,
+  "collector_has_top_level_exit": false
+}

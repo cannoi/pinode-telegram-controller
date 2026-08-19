@@ -1,0 +1,27 @@
+PI NODE TELEGRAM CONTROLLER PRO — SECURITY ROTATION REQUIRED
+===============================================================
+
+The uploaded release contained Telegram Bot Token and Gemini API Key values.
+Those credentials have been removed from this cleaned package.
+
+ACTION REQUIRED BEFORE PRODUCTION USE
+1. Revoke/rotate the Telegram bot token in Telegram BotFather.
+2. Revoke/delete the exposed Gemini API key in Google AI Studio.
+3. Create replacement credentials.
+4. Run Setup_Config.bat and enter the replacement credentials.
+5. Do not paste credentials into README, logs, Telegram messages, or source files.
+
+The private Config/PiNode_Config.ps1 is intentionally blank in this package and is excluded by .gitignore.
+
+Security changes included:
+- Chat ID whitelist remains enforced.
+- Telegram message rate limit: 30 accepted messages / 60 seconds for the whitelisted chat.
+- /cleanram now requires /confirmcleanram.
+- /maintenance requires /confirm.
+- /reset requires /confirmreset.
+- /cmd and /ps require /confirmshell.
+- Registered program paths are validated to remain inside the application root.
+- Container names are validated before being stored.
+- Controller logs redact Bot Token and Gemini API Key patterns.
+- Runtime state/history/log files are excluded from source control.
+- Auto-reset is OFF by default after cleanup; it can be explicitly enabled later from scheduler settings.

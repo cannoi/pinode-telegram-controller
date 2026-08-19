@@ -2,26 +2,47 @@
   "repository": "cannoi/pinode-telegram-controller",
   "download_url": "https://github.com/cannoi/pinode-telegram-controller/archive/refs/heads/main.zip",
   "preservation_policy": "MASTER_RELEASE_POLICY.md",
+  "generated_for": "Security Hardening Release 2026-08-19",
   "files": [
     {
+      "path": ".github/workflows/powershell-syntax.yml",
+      "size_bytes": 1149,
+      "sha256": "281212452c4f742a8134e9e1a6c436ae9226e109e1af85456adaa48043c16841"
+    },
+    {
+      "path": ".gitignore",
+      "size_bytes": 635,
+      "sha256": "f1442fcdf6f0f5d5d02c82b630cc3de25aa5c4947e0287ec7b8ada0e442fd4ca"
+    },
+    {
+      "path": "Apply-Updates.ps1",
+      "size_bytes": 10216,
+      "sha256": "61af6b8ba6c5df67b07627652af115a9c991afd7109ba0ca780d79dd07db9436"
+    },
+    {
       "path": "Check_Installation.bat",
-      "size_bytes": 758,
-      "sha256": "1c26cb11c3ec1c4806e6a304a734754ae275a9aa8febda702d46332c22cd2c68"
+      "size_bytes": 823,
+      "sha256": "4ff1256968d593df3800f98f6a0d95b8f739d658d3c3a4b48f48092f7f72bb82"
     },
     {
       "path": "Commands/commands.json",
-      "size_bytes": 733,
-      "sha256": "838d96b3f531a9db8eea7c012a17a7f323cd269a944b80939b56541033456e28"
+      "size_bytes": 1545,
+      "sha256": "121d7990539bbc49fff93a674749171872ab241af66156ca8b6b445bb8502f18"
     },
     {
       "path": "Config/PiNode_Config.ps1",
-      "size_bytes": 2883,
-      "sha256": "909b91ced5f024e4c61cd963c9b110ad9c29f7e41c5f8c227c252aa8cd8a5d42"
+      "size_bytes": 3891,
+      "sha256": "f71163e0776aa1fbce84a97bb90844304419dfe00f77f97e54114b210c22c5d5"
+    },
+    {
+      "path": "Config/PiNode_Config.template.ps1",
+      "size_bytes": 3832,
+      "sha256": "580712948e132a07d527b11c29558db796159f0088682a8cd25aa44f0f54a684"
     },
     {
       "path": "Controller/PiNode_Telegram_Controller_PRO_v2.0.ps1",
-      "size_bytes": 130384,
-      "sha256": "145984892be7e93f2170c540f77723ce72742f8ceee4ce51cf485bbb152ca33a"
+      "size_bytes": 188765,
+      "sha256": "26907c63f49dd67e92904f562e7e489c62d095f672f45c4baff09bb3d6300f5b"
     },
     {
       "path": "Data/CleanRAM_PiNode.ps1",
@@ -55,8 +76,8 @@
     },
     {
       "path": "Data/Gemini_Knowledge_Base.txt",
-      "size_bytes": 8441,
-      "sha256": "1de54729a6262052a6def8badfc622837864db0a52c56e5af8787afe78b95302"
+      "size_bytes": 10380,
+      "sha256": "ca0b829f652bca7338364df54b1d0d904a56de46ae8fd15e0e6150fea93ba36d"
     },
     {
       "path": "Data/Historical_AI_Analysis_Knowledge.txt",
@@ -64,9 +85,49 @@
       "sha256": "85946122cd08d8f57223ccb4700475183d91a986fb86c50894b4f71306402db1"
     },
     {
+      "path": "Data/PiNodeMonitorLive/.gitkeep",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "Data/PiNodeMonitorLive_CMD_v2/PiNodeMonitorLive.ps1",
+      "size_bytes": 19495,
+      "sha256": "8156a67d24e8ce54e3432c8ea71c6ddb7d4de8c58cd256986b339b06d0223705"
+    },
+    {
+      "path": "Data/PiNodeMonitorLive_CMD_v2/PiNodeMonitorLive_Once.ps1",
+      "size_bytes": 5946,
+      "sha256": "5318c4b4e9398d23e9d92e2a2ae8d49abc10be97e9a22bf477b08771c4aaac0e"
+    },
+    {
+      "path": "Data/PiNodeMonitorLive_CMD_v2/PiNodeMonitorLive_Service.ps1",
+      "size_bytes": 16866,
+      "sha256": "d200dfdb6b1651b369cca06c3576167e1cc8946322f2e8e2c0661ad429dc40df"
+    },
+    {
+      "path": "Data/PiNodeMonitorLive_CMD_v2/README.txt",
+      "size_bytes": 786,
+      "sha256": "39d0f32f29bd75d459d2d156c4b0c28f638c14f45b090dd3cced55fef3806512"
+    },
+    {
+      "path": "Data/PiNodeMonitorLive_CMD_v2/Run-PiNodeMonitor.bat",
+      "size_bytes": 152,
+      "sha256": "88e78a9dbfc5369f6405e5ad31edcb1aa882f0de47b5298a79e6eb4e974f6f62"
+    },
+    {
+      "path": "Data/PiNodeMonitorLive_CMD_v2/Run-PiNodeMonitorLive_Service.bat",
+      "size_bytes": 170,
+      "sha256": "25b83a147cacc98daa9ed3d66b5e2bbbc6ce87d255808ec5365e4922710b66c8"
+    },
+    {
+      "path": "Data/PiNodeMonitorLive_CMD_v2/data/data-schema.json",
+      "size_bytes": 299,
+      "sha256": "50533f527a43990547d797bb951e5a5200bd66ac3fa5f4d83ee0f9d73ebce716"
+    },
+    {
       "path": "Data/PiNode_SmartMonitor_v9_CentralConfig.ps1",
-      "size_bytes": 29036,
-      "sha256": "98709b9048e7c2ac0ce899e44645499cd3bc22d0d68bf9e13a63b3f89198b280"
+      "size_bytes": 35175,
+      "sha256": "1b91419fff2b4cc95668de8fcb287ed528d3d4bb2bda997147953266860b37ba"
     },
     {
       "path": "Data/Pi_Desktop_Node_Knowledge.txt",
@@ -75,8 +136,8 @@
     },
     {
       "path": "Data/Pi_Node_Diagnostic_PRO.ps1",
-      "size_bytes": 16041,
-      "sha256": "596a9bcadc238c3c867bb395d797f2522b1cfd68133d957885499f582360753e"
+      "size_bytes": 15426,
+      "sha256": "f1204d32e844b02390dc2cd08594b25b52dfaef796f0ecb10f3793b23a52813e"
     },
     {
       "path": "Data/Reset_Node_Network.ps1",
@@ -89,6 +150,11 @@
       "sha256": "378d623aa07e21ba1dba423ccaedee767402171a0806d548a72a54eb14bb2014"
     },
     {
+      "path": "Data/SMART_EVIDENCE_ARCHITECTURE.md",
+      "size_bytes": 544,
+      "sha256": "78d679d8dd54f04343ca77be0d76f23f6dfd399cd284e43191a0f7288ac912f2"
+    },
+    {
       "path": "Data/Test_Diagnostic_Pipeline.ps1",
       "size_bytes": 708,
       "sha256": "1d8e4c8b9f46ec8c5215ac69c5ef9bd19aa2f62bc7dba21054765dac76be52d4"
@@ -99,9 +165,14 @@
       "sha256": "43ae0b26385072e096a3090b58998c412a84e9624c9a6f246e6fea49621001a6"
     },
     {
-      "path": "Data/chat_history.json",
-      "size_bytes": 3,
-      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+      "path": "Data/assets/OpenHardwareMonitorLib.dll",
+      "size_bytes": 311808,
+      "sha256": "ef02b0991aac678052bb79dfdfd5bfa0b42b1f34b209e35819ba606909655f58"
+    },
+    {
+      "path": "Data/monitor_data_schema.json",
+      "size_bytes": 1299,
+      "sha256": "037c14611c8d14366ae70c9ad9e39424f50407dbff0c7e58826feab7ba93b7c9"
     },
     {
       "path": "Data/send_tele.ps1",
@@ -109,9 +180,19 @@
       "sha256": "eafb6266d3baaec19e69848c39f775ffea9238efe07de0a5b5fbef6bef2429fd"
     },
     {
+      "path": "Export-AppTree.ps1",
+      "size_bytes": 1734,
+      "sha256": "3996a40c89228feb0b4f1d6df25b94a7bff7df5438f0a56435e282530dc9945b"
+    },
+    {
       "path": "HUONG_DAN_SU_DUNG.txt",
       "size_bytes": 7526,
       "sha256": "13d80bc304c7c3ebc6e989d736c19ad82d1ecfb75beb3bd2c2f3bc698ff88fbe"
+    },
+    {
+      "path": "INTEGRATION_VALIDATION.txt",
+      "size_bytes": 283,
+      "sha256": "5c8dcc1cc966507ae77f388079b581250926a12f192635ccc1333c49bfcecbe3"
     },
     {
       "path": "Install_Controller_Task.bat",
@@ -119,39 +200,84 @@
       "sha256": "096681d4e761db80e9d32cfeff705127dc8270bc9f779e44d5a72c48f31f8aa4"
     },
     {
+      "path": "Install_LiveReader_Task.bat",
+      "size_bytes": 649,
+      "sha256": "d92079c7f7555d0af459f3c5a4a5380bf429ba8fab5d0d61ce9e8d2723fe285e"
+    },
+    {
+      "path": "Logs/.gitkeep",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
       "path": "MASTER_RELEASE_POLICY.md",
       "size_bytes": 1523,
       "sha256": "9b36024f1c73468ccc482ac04d82214b4bf97c0c848a76ecb795d2c8bbefd4b3"
     },
     {
-      "path": "Modules/Alert/README.txt",
-      "size_bytes": 95,
-      "sha256": "0702601e2a94b171a53ee952e21239dec1a246fb3cf97482609e933b5628edc1"
+      "path": "Modules/Security_Guard.ps1",
+      "size_bytes": 1710,
+      "sha256": "4e6200e542f3d12658f53df2cdc6a2145634b2fa82cc39f282d7e44fc9f4aa0b"
     },
     {
-      "path": "Modules/Maintenance/README.txt",
-      "size_bytes": 117,
-      "sha256": "d1c850562f5622afd180f64126f120b5732ed80485985bc97fcfce2fdfa1597e"
+      "path": "Modules/Updated_Core_Logic.ps1",
+      "size_bytes": 1187,
+      "sha256": "0df4cc1d9e3681dca6abce29ad83f8668f2218ab29da64e38add6b772c93d667"
     },
     {
-      "path": "Modules/Monitor/README.txt",
-      "size_bytes": 131,
-      "sha256": "46c29c1fab768922f56730bc679f1ad72938ec6621b16a12037b5b1beff8da56"
-    },
-    {
-      "path": "Modules/Scheduler/README.txt",
-      "size_bytes": 110,
-      "sha256": "ffb8c6447756c3f27984f38705ce1550e12717420def683d145cdd77bfd88c1f"
+      "path": "Pi_Node_Telegram_Controller_PRO.exe",
+      "size_bytes": 164352,
+      "sha256": "62a21d5b2c9efa9db3fde214fae7d2be6d6ed37673ebb1fbbb63f692e825ba5e"
     },
     {
       "path": "README.md",
-      "size_bytes": 3088,
-      "sha256": "da87d446793bad32c55a421fd16a8be2f48636e0bab4f2457c156129aaa928c3"
+      "size_bytes": 3991,
+      "sha256": "49c554847efd507da9348c23fc778ee4fef0317f4508f6dda0efb5e04ee3a42e"
     },
     {
-      "path": "README.txt",
-      "size_bytes": 2476,
-      "sha256": "8d495cb98f54d3b309a14b4d97fbb50b4886f72c584a7f8246b36bf02642180b"
+      "path": "README_V13_MERGED_SAFE.md",
+      "size_bytes": 1606,
+      "sha256": "fd4f11a80917392f1d9bbe6b2d8d1e22a99a30548675048cb611ddc9ec834e75"
+    },
+    {
+      "path": "RELEASE_NOTES/SECURITY_HARDENING_2026-08-19.md",
+      "size_bytes": 1502,
+      "sha256": "66457afce948a1a16b1680b5803fdf30f75876eab341140eb66148b04e83e659"
+    },
+    {
+      "path": "RELEASE_NOTES/V11.2_EXTERNAL_LIVE_READER.md",
+      "size_bytes": 532,
+      "sha256": "55d2b454a01ddc2e63cfdea3d82bf9a883a0b3160a4f2764a3ea93247326c9a4"
+    },
+    {
+      "path": "RELEASE_NOTES/V11_CHANGELOG.md",
+      "size_bytes": 2044,
+      "sha256": "3d42d4f2bdec67fa5862a4d07c5f02af463b6ac2dffa4ec0386f2569a7b8a95e"
+    },
+    {
+      "path": "RELEASE_NOTES/V12_LIVE_SERVICE_DECOUPLED.md",
+      "size_bytes": 1470,
+      "sha256": "636549bc73e4dbf2f694358212ecb3a1124bf2656e0bdb94dfe3a9325a72fdc5"
+    },
+    {
+      "path": "RELEASE_NOTES/V13.1_FINAL.md",
+      "size_bytes": 2426,
+      "sha256": "de898bf65b34fc1799bc924618414d796b2a8e1250d6ffa3325f5c1487bc98b1"
+    },
+    {
+      "path": "RELEASE_NOTES/V13.1_RESTORED_DATA_IO.md",
+      "size_bytes": 526,
+      "sha256": "474de335bdd0d00666281746a840da8fa7c2d91972f14acb5d80e28afb61abb9"
+    },
+    {
+      "path": "RELEASE_NOTES/V13.1_SAFE_FEATURE_INTEGRATION.md",
+      "size_bytes": 1106,
+      "sha256": "1b479e9d8f1a2b6b9b4d2ee3ae20d601c1d48287adde9bf749265e4857a89491"
+    },
+    {
+      "path": "SECURITY_ROTATION_REQUIRED.txt",
+      "size_bytes": 1400,
+      "sha256": "535dc31db7c6fb53d6820093bbc574cb9c8d1cffb00230aeb8c5459d2702a9ab"
     },
     {
       "path": "Setup_Config.bat",
@@ -160,28 +286,38 @@
     },
     {
       "path": "Setup_Config.ps1",
-      "size_bytes": 7473,
-      "sha256": "9cdbfc0417e9019341afa203a97cf150cb4dca4dbda2aefc83fa909c76ef694f"
+      "size_bytes": 8688,
+      "sha256": "12cfee3c72855a53b52c2bd2c9e0d094550328455cfadc8bf257bf3581b9ea5d"
     },
     {
       "path": "Start_Controller.bat",
-      "size_bytes": 1426,
-      "sha256": "8160fdd3b860dc62fd016fa62fc4bc4f88ce8c2ed76ca95de8f4cba8541f02eb"
-    },
-    {
-      "path": "Start_Controller.exe",
-      "size_bytes": 471084,
-      "sha256": "9e4bd41211a28429d57b9daafbc922c32e3be029915165fa1dcf4c321ec266a8"
+      "size_bytes": 2752,
+      "sha256": "81384ddfc17684dd5335915f0165550b8a2df85680de314d645c514595ccde05"
     },
     {
       "path": "Start_Controller_Hidden.bat",
-      "size_bytes": 194,
-      "sha256": "0a89e32e744b05102561a9861920421c9fa5c72eeadb15b0c12ed17e58c3b5b4"
+      "size_bytes": 1163,
+      "sha256": "121ed5c5fa00f0340d9265e15ede90c085d1195fe4438466c1731f7ba504ba11"
+    },
+    {
+      "path": "State/.gitkeep",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     {
       "path": "Stop_Controller.bat",
       "size_bytes": 585,
       "sha256": "35e2aa6218c4e0c0f2e19c686ba67bf049943a6307ce41d7bffbf9bf08023198"
+    },
+    {
+      "path": "Stop_LiveReader.bat",
+      "size_bytes": 366,
+      "sha256": "d9262dfc25deca645841df654930f88be4eb274184b1d72902636a76bf0f3013"
+    },
+    {
+      "path": "repository_inventory.json",
+      "size_bytes": 6209,
+      "sha256": "d77544b0aa7747ffffcbb1879af9890a357cfed68b4739a7e732175fa224fd9d"
     }
   ]
 }

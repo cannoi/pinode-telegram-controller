@@ -1,12 +1,21 @@
-# Pi Node Telegram Controller PRO
+﻿# Pi Node Telegram Controller PRO
 
 Trợ lý vận hành **Pi Node** 24/7 qua Telegram trên Windows.
 
 Giám sát đồng bộ, cổng, Docker, RAM/CPU/nhiệt độ — cảnh báo sự cố thật, báo cáo định kỳ, điều khiển từ xa bằng lệnh hoặc tiếng Việt tự nhiên.
 
+## Kiến trúc giám sát dữ liệu mới (v11 SMART EVIDENCE)
+
+- `/monitor` dùng collector chuẩn: stellar-core + Docker + Windows/CIM + OpenHardwareMonitorLib.dll; không dùng OCR cho số liệu Node.
+- Chu kỳ ổn định mặc định 5 phút; khi lỗi quét lại 60 giây tối đa 10 lần. Disk/VHDX được cache khoảng 30 phút.
+- Cảnh báo/phân tích có bằng chứng đo được; dữ liệu thiếu không bị biến thành số 0. AI chỉ diễn giải evidence packet.
+- Auto-reset cần nhiều tín hiệu liên quan, lặp lại đủ streak và tối đa 1 lần/ngày.
+- Archive NDJSON khoảng 45 ngày, đồng thời giữ node_history.json để tương thích app cũ.
+- user_habits.json tiếp tục học thói quen để giảm phụ thuộc AI.
+
 ## Tính năng chính
 
-- Smart Monitor: đọc PiCheck / Pi Desktop + fallback sensor hệ thống
+- Smart Monitor: collector chuẩn hóa từ stellar-core + Docker + Windows/CIM + OpenHardwareMonitorLib (không OCR)
 - Phân mức sự cố: Soft / Warning / Critical (không báo giả khi thiếu PiCheck)
 - Lịch tự động chỉnh trên Telegram (`/scheduler`)
 - Phong cách trả lời theo người dùng (`/settings`: simple | balanced | numeric)
@@ -65,7 +74,7 @@ Modules/         # Ghi chú module
 
 ## SoloHost / Docker
 
-Bản này chạy **native Windows PowerShell** (OCR cửa sổ Pi Desktop, Task Scheduler).  
+Bản này chạy **native Windows PowerShell** (collector API/hệ thống, Task Scheduler). Pi Desktop vẫn được theo dõi như tín hiệu phụ.  
 Package SoloHost cần image Linux riêng và registry công khai — xem nhánh/docs SoloHost nếu có.
 
 ## Phiên bản

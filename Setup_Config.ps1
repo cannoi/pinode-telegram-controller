@@ -1,4 +1,5 @@
-﻿# ============================================================
+﻿if (Test-Path "$PSScriptRoot/Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/Modules/Updated_Core_Logic.ps1" } elseif (Test-Path "$PSScriptRoot/../Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/../Modules/Updated_Core_Logic.ps1" } elseif (Test-Path "$PSScriptRoot/../../Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/../../Modules/Updated_Core_Logic.ps1" }
+# ============================================================
 # SETUP CONFIG - PI NODE TELEGRAM CONTROLLER
 # UTF-8 / Windows PowerShell 5.1 compatible
 # ============================================================
@@ -62,7 +63,8 @@ function Read-CfgValue {
 function Ask {
     param(
         [string]$Label,
-        [string]$Current
+        [string]$Current,
+        [switch]$Secret
     )
 
     Write-Host ''
@@ -73,7 +75,25 @@ function Ask {
         Write-Host '    Hien tai: (chua co)' -ForegroundColor DarkGray
     }
     else {
-        Write-Host ('    Hien tai: ' + $Current) -ForegroundColor DarkGray
+        if ($Secret) {
+            $masked = if ($Current.Length -le 8) { '********' } else { $Current.Substring(0,4) + '…' + $Current.Substring($Current.Length-4) }
+            Write-Host ('    Hien tai: ' + $masked) -ForegroundColor DarkGray
+        } else {
+            Write-Host ('    Hien tai: ' + $Current) -ForegroundColor DarkGray
+        }
+    }
+
+    if ($Secret) {
+        $Value = Read-Host '    Nhap moi (Enter = giu nguyen)' -AsSecureString
+        $bstr = $null
+        try {
+            $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
+            $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        } finally {
+            if ($bstr) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+        }
+        if ([string]::IsNullOrWhiteSpace($plain)) { return $Current }
+        return $plain.Trim()
     }
 
     $Value = Read-Host '    Nhap moi (Enter = giu nguyen)'
@@ -172,7 +192,8 @@ $ram = Read-CfgValue `
 
 $bot = Ask `
     -Label '[1] Telegram Bot Token' `
-    -Current $bot
+    -Current $bot `
+    -Secret
 
 $chat = Ask `
     -Label '[2] Telegram Chat ID' `
@@ -180,7 +201,8 @@ $chat = Ask `
 
 $gem = Ask `
     -Label '[3] Google Gemini API Key' `
-    -Current $gem
+    -Current $gem `
+    -Secret
 
 $mon = Ask `
     -Label '[4] Phut giua moi lan kiem tra Node (mac dinh 60)' `
