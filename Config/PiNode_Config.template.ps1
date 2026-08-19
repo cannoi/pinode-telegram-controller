@@ -1,6 +1,8 @@
-﻿# PI NODE CENTRAL CONFIG
+﻿if (Test-Path "$PSScriptRoot/Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/Modules/Updated_Core_Logic.ps1" } elseif (Test-Path "$PSScriptRoot/../Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/../Modules/Updated_Core_Logic.ps1" } elseif (Test-Path "$PSScriptRoot/../../Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/../../Modules/Updated_Core_Logic.ps1" }
+# PI NODE CENTRAL CONFIG
+# SECURITY: credentials are intentionally blank. Keep secrets only in the local PiNode_Config.ps1.
 # Windows PowerShell 5.1 / Portable
-# KHONG LUU TOKEN/API KEY VAO GIT. Dung Setup_Config.ps1 de nhap cau hinh.
+# CHI FILE NAY CHUA TOKEN / API / CAC CAI DAT CHUNG.
 # Dien day du cac gia tri ben duoi truoc khi chay Controller / Monitor / Maintenance.
 
 $BotToken = ""
@@ -49,37 +51,45 @@ $AppRoot = Split-Path -Parent $PSScriptRoot
 $DataDir = Join-Path $AppRoot 'Data'
 $LogDir = Join-Path $AppRoot 'Logs'
 $StateDir = Join-Path $AppRoot 'State'
-$HistoryFile = Join-Path $DataDir 'node_history.json'
+$HistoryFile = Join-Path $DataDir 'PiNodeMonitorLive\history'
 $ChatHistoryFile = Join-Path $DataDir 'chat_history.json'
 $ChatHistoryMaxRecords = 500
 $ChatHistoryContextTurns = 8
 $ControllerLog = Join-Path $LogDir 'controller.log'
-$MonitorScript = Join-Path $DataDir 'PiNode_SmartMonitor_v9_CentralConfig.ps1'
+# V12: Controller khong chay collector. Live Service ghi latest.json.
+$MonitorScript = Join-Path $DataDir 'PiNodeMonitorLive_CMD_v2\PiNodeMonitorLive_Once.ps1'  # legacy one-shot (optional)
 $CleanRamScript = Join-Path $DataDir 'CleanRAM_PiNode.ps1'
 $MaintenanceScript = Join-Path $DataDir 'Weekly_Maintenance.ps1'
 $DiagnosticScript = Join-Path $DataDir 'Pi_Node_Diagnostic_PRO.ps1'
 $ResetNodeScript = Join-Path $DataDir 'Reset_Node_Network.ps1'
 $ProblemRescanMinutes = 1
 $ProblemStreakBeforeReset = 3
-$AutoResetOnSyncPortFail = $true
+$AutoResetOnSyncPortFail = $false
 $LedgerAgeMaxSec = 30
 $DiskFreeMinGB = 20
 $DiskSampleMinutes = 30
-$NodeHistoryMaxRecords = 2500
+$NodeHistoryMaxRecords = 5000  # đọc tối đa từ NDJSON, không tạo file lịch sử thứ hai
+$NodeHistoryArchiveDays = 7
+$NodeHistoryArchiveMaxMB = 200
+$VhdxSampleMinutes = 30
+$PeerDropPercent = 50
+$PeerBaselineMin = 4
+$DenseRescanMaxRuns = 10
+# De trong = tu dong tim container co stellar-core. Neu can: $PiContainerName = "testnet2"
+$PiContainerName = ""
 $SendTeleScript = Join-Path $DataDir 'send_tele.ps1'
 
 # Lich trinh: im lang khi an toan; chi Telegram khi Node co van de / loi
-# MonitorIntervalMinutes=5: quet dinh ky; khi loi rescan 1 phut (toi da 10 lan day)
 $SchedulerEnabled = $true
-$MonitorIntervalMinutes = 5
+$MonitorIntervalMinutes = 1
 $MonitorRunOnControllerStart = $false
 $DailyReportHours = @(7, 18)
 $MaintenanceDayOfWeek = 0
-$WeeklyMaintenanceTime = '23:00'
+$WeeklyMaintenanceTime = '03:00'
 $SchedulerNotifyStart = $false
 $SchedulerNotifyFinish = $false
-$AlertRepeat = 3
-$AlertRepeatDelaySec = 2
+$AlertRepeat = 1
+$AlertRepeatDelaySec = 5
 $AlertPlaySound = $true
 
 $Registered = [ordered]@{
@@ -92,3 +102,6 @@ $Registered = [ordered]@{
 foreach ($d in @($DataDir, $LogDir, $StateDir)) {
     New-Item -ItemType Directory -Path $d -Force -ErrorAction SilentlyContinue | Out-Null
 }
+
+
+
