@@ -2,42 +2,111 @@ name: PowerShell Syntax Check
 
 on:
   push:
-    branches: ["main", "master"]
+    branches:
+      - main
+      - master
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   powershell-syntax:
+    name: Validate PowerShell syntax
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install PowerShell
         uses: PowerShell/PowerShell@v1
+        with:
+          powershell-version: "7.4.x"
 
       - name: Parse PowerShell files
         shell: pwsh
         run: |
-          $errors = @()
-          Get-ChildItem -Recurse -Filter *.ps1 |
-            Where-Object { $_.FullName -notmatch '[\\/](Logs|State)[\\/]' } |
-            ForEach-Object {
-              $tokens = $null
-              $parseErrors = $null
-              [System.Management.Automation.Language.Parser]::ParseFile(
-                $_.FullName,
-                [ref]$tokens,
-                [ref]$parseErrors
-              ) | Out-Null
-              if ($parseErrors.Count -gt 0) {
-                $errors += "$($_.FullName): $($parseErrors -join '; ')"
-              }
-            }
+          $ErrorActionPreference = 'Stop'
 
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Error $_ }
-            exit 1
+          $excludedDirectories = @(
+              'Logs',
+              'State',
+              '.git',
+              'node_modules',
+              'bin',
+              'obj'
+          )
+
+          $files = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -File |
+              Where-Object {
+                  $_.Extension -in '.ps1', '.psm1' -and
+                  $_.FullName -notmatch '[\\/](Logs|State|\.git|node_modules|bin|obj)[\\/]'
+              } |
+              Sort-Object FullName
+
+          if (-not $files) {
+              Write-Host "No PowerShell files found."
+              exit 0
           }
 
-          Write-Host "PowerShell syntax check passed."
+          Write-Host "Checking $($files.Count) PowerShell file(s)..."
+          Write-Host ""
+
+          $failed = $false
+          $errorCount = 0
+
+          foreach ($file in $files) {
+              $tokens = $null
+              $parseErrors = $null
+
+              try {
+                  [System.Management.Automation.Language.Parser]::ParseFile(
+                      $file.FullName,
+                      [ref]$tokens,
+                      [ref]$parseErrors
+                  ) | Out-Null
+              }
+              catch {
+                  Write-Error "Parser exception: $($file.FullName)`n$($_.Exception.Message)"
+                  $failed = $true
+                  continue
+              }
+
+              if ($parseErrors -and $parseErrors.Count -gt 0) {
+                  $failed = $true
+
+                  Write-Host "::error file=$($file.FullName)::PowerShell syntax error(s) found"
+
+                  foreach ($error in $parseErrors) {
+                      $errorCount++
+
+                      $line = $error.Extent.StartLineNumber
+                      $column = $error.Extent.StartColumnNumber
+                      $message = $error.Message
+
+                      Write-Host "  $($file.FullName):$line:$column - $message"
+                  }
+
+                  Write-Host ""
+              }
+              else {
+                  Write-Host "PASS  $($file.FullName)"
+              }
+          }
+
+          Write-Host ""
+          Write-Host "========================================"
+          Write-Host "PowerShell Syntax Check Summary"
+          Write-Host "========================================"
+          Write-Host "Files checked : $($files.Count)"
+          Write-Host "Syntax errors : $errorCount"
+          Write-Host ""
+
+          if ($failed) {
+              Write-Error "PowerShell syntax check FAILED."
+              exit 1
+          }
+
+          Write-Host "PowerShell syntax check PASSED."
