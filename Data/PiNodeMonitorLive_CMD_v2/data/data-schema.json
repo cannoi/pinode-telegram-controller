@@ -1,1 +1,11 @@
-
+{
+  "mode": "read-only",
+  "priority": ["Stellar/Docker", "Windows hardware", "ports", "Pi Desktop optional"],
+  "refresh_policy": {
+    "node_seconds": 60,
+    "hardware_seconds": 60,
+    "ports_seconds": 60,
+    "write_seconds": 60
+  },
+  "missing_data": "never convert missing sensors to zero"
+}
