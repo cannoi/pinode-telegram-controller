@@ -46,54 +46,6 @@ foreach ($cand in @(
 }
 
 New-Item -ItemType Directory -Force -Path $LiveDir, $HistDir, $HourlyDir, $DailyDir | Out-Null
-
-
-# ============================================================
-# Khi đóng cửa sổ Live → tắt toàn bộ Controller + script liên quan
-# ============================================================
-function Stop-RelatedOnLiveExit {
-    param([string]$Reason = 'live_window_closed')
-    $myPid = $PID
-    $patterns = @(
-        'PiNode_Telegram_Controller_PRO',
-        'PiNodeMonitorLive_Service\.ps1',
-        'PiNodeMonitorLive_Once\.ps1'
-    )
-    try {
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.ProcessId -ne $myPid -and
-                $_.CommandLine -and
-                ($patterns | Where-Object { $_.CommandLine -match $_ })
-            } |
-            ForEach-Object {
-                try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
-            }
-    } catch {}
-    try {
-        $pidCtrl = Join-Path $AppRoot 'State\controller.pid'
-        if (Test-Path -LiteralPath $pidCtrl) {
-            $op = 0
-            try { $op = [int]((Get-Content -LiteralPath $pidCtrl -Raw).Trim()) } catch {}
-            if ($op -gt 0 -and $op -ne $myPid) {
-                try { Stop-Process -Id $op -Force -ErrorAction SilentlyContinue } catch {}
-            }
-            Remove-Item -LiteralPath $pidCtrl -Force -ErrorAction SilentlyContinue
-        }
-    } catch {}
-    try {
-        if ($PidPath -and (Test-Path -LiteralPath $PidPath)) {
-            Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
-        }
-    } catch {}
-}
-
-try {
-    Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
-        try { Stop-RelatedOnLiveExit -Reason 'live_exiting' } catch {}
-    } | Out-Null
-} catch {}
-
 try { Set-Content -LiteralPath $PidPath -Value $PID -Encoding ASCII } catch {}
 
 # REBUILT State shape
@@ -211,47 +163,54 @@ function Get-Temp {
 }
 
 function Get-HardwareSnapshot {
+    param(
+        [switch]$IncludeTemp,
+        [switch]$IncludeDisk
+    )
+
     $cpu = Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty CounterSamples | Select-Object -First 1
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
-    $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
     $vm = Get-Process vmmem, vmmemWSL -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum
+
+    $disk = $null
+    if ($IncludeDisk) {
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
+    }
+
     [pscustomobject]@{
         CPU   = if ($cpu) { [math]::Round($cpu.CookedValue, 1) } else { $null }
         RAM   = if ($os) { [math]::Round((1 - ($os.FreePhysicalMemory / $os.TotalVisibleMemorySize)) * 100, 1) } else { $null }
-        Temp  = Get-Temp
+        Temp  = if ($IncludeTemp) { Get-Temp } else { $null }
         Disk  = if ($disk -and $disk.Size) { [math]::Round((1 - ($disk.FreeSpace / $disk.Size)) * 100, 1) } else { $null }
         Vmmem = if ($vm -and $vm.Sum) { [math]::Round($vm.Sum / 1GB, 2) } else { $null }
         DiskFreeGB = if ($disk) { [math]::Round($disk.FreeSpace / 1GB, 2) } else { $null }
     }
 }
 
-
 function Get-DockerStatus {
-    # Docker health: is daemon up + is the configured Pi Node container running?
+    # Lightweight Docker health check:
+    # 1 docker info + 1 docker inspect. Avoid docker ps + docker ps -a every cycle.
     $daemon = $false
     $ctn = $null
     $ctnStatus = $null
     $wanted = Get-ConfiguredPiContainerName
+
     try {
         $v = docker info --format "{{.ServerVersion}}" 2>$null
         if ($v) { $daemon = $true }
     } catch {}
-    if ($daemon) {
+
+    if ($daemon -and $wanted) {
         try {
-            $names = @(docker ps --format "{{.Names}}" 2>$null)
-            if ($names -contains $wanted) {
+            $status = (docker inspect --format "{{.State.Status}}" $wanted 2>$null | Select-Object -First 1)
+            if ($status) {
                 $ctn = $wanted
-                $ctnStatus = "running"
-            } else {
-                $all = @(docker ps -a --format "{{.Names}} {{.Status}}" 2>$null | Where-Object { $_ -match ("(?i)^" + [regex]::Escape($wanted) + "\s") })
-                if ($all) {
-                    $ctn = $wanted
-                    $ctnStatus = if ($all[0] -match "(?i)Up") { "running" } else { "stopped" }
-                }
+                $ctnStatus = [string]$status
             }
         } catch {}
     }
+
     return [pscustomobject]@{
         Docker    = if ($daemon) { "RUNNING" } else { "STOPPED" }
         Container = $ctn
@@ -260,28 +219,31 @@ function Get-DockerStatus {
 }
 
 function Get-PortSnapshot {
-    # Controller (/status /report) expects exactly: port = "OPEN" | "CLOSED"
-    # OPEN  = all of 31401,31402,31403 are LISTEN
-    # CLOSED = any port not listening
+    # One Windows socket query for all Node ports instead of 3 separate queries + netstat.
     $ports = @(31401, 31402, 31403)
-    $okCount = 0
-    foreach ($p in $ports) {
-        $listen = $false
+    try {
+        $listening = @(
+            Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPort -in $ports } |
+            Select-Object -ExpandProperty LocalPort -Unique
+        )
+        if ($listening.Count -eq $ports.Count) { return "OPEN" }
+        return "CLOSED"
+    } catch {
+        # Compatibility fallback: one netstat scan only.
         try {
-            $listen = [bool](Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue | Select-Object -First 1)
-        } catch {}
-        if (-not $listen) {
-            try {
-                $line = netstat -ano 2>$null | Select-String -Pattern (":" + $p + "\s+.*LISTENING") | Select-Object -First 1
-                if ($line) { $listen = $true }
-            } catch {}
+            $ns = @(netstat -ano 2>$null)
+            foreach ($p in $ports) {
+                if (-not ($ns | Select-String -Pattern (":" + $p + "\s+.*LISTENING"))) {
+                    return "CLOSED"
+                }
+            }
+            return "OPEN"
+        } catch {
+            return "CLOSED"
         }
-        if ($listen) { $okCount++ }
     }
-    if ($okCount -eq $ports.Count) { return "OPEN" }
-    return "CLOSED"
 }
-
 
 function Update-NodeData {
     # 1) PRIMARY: Stellar-Core via Docker (stable, no UI interference)
@@ -378,16 +340,21 @@ function Save-MonitorData {
         Get-ChildItem $HistDir -Filter '*.ndjson' -File -ErrorAction SilentlyContinue |
             Where-Object { $_.LastWriteTime -lt $now.AddDays(-7) } | Remove-Item -Force -ErrorAction SilentlyContinue
 
-        $hist = @()
-        if (Test-Path $NodeHistoryPath) {
-            try {
-                $x = Get-Content $NodeHistoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
-                if ($x -is [array]) { $hist = @($x) } elseif ($x) { $hist = @($x) }
-            } catch {}
+        # Compatibility cache only. The controller reads latest.json + NDJSON history first.
+        # Rewriting a 1500-record JSON array every minute caused unnecessary disk I/O and CPU.
+        # The main live history remains unchanged and is still written every cycle.
+        if ($script:WriteCompatHistory) {
+            $hist = @()
+            if (Test-Path $NodeHistoryPath) {
+                try {
+                    $x = Get-Content $NodeHistoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                    if ($x -is [array]) { $hist = @($x) } elseif ($x) { $hist = @($x) }
+                } catch {}
+            }
+            $hist += [pscustomobject]$record
+            if ($hist.Count -gt 1500) { $hist = @($hist | Select-Object -Last 1500) }
+            ($hist | ConvertTo-Json -Depth 10 -Compress) | Set-Content -LiteralPath $NodeHistoryPath -Encoding UTF8
         }
-        $hist += [pscustomobject]$record
-        if ($hist.Count -gt 1500) { $hist = @($hist | Select-Object -Last 1500) }
-        ($hist | ConvertTo-Json -Depth 10 -Compress) | Set-Content -LiteralPath $NodeHistoryPath -Encoding UTF8
 
         try {
             $archiveDir = Join-Path $DataDir 'History\Node'
@@ -409,149 +376,52 @@ function Save-MonitorData {
     } catch {}
 }
 
-
-# ============================================================
-# Xác nhận lệnh nguy cơ cao từ Controller (cửa sổ Live hiển thị)
-# File: Data/PiNodeMonitorLive/pending_action.json
-# Kết quả: Data/PiNodeMonitorLive/pending_action_result.json
-# ============================================================
-function Test-PendingDangerousAction {
-    $pendingPath = Join-Path $LiveDir "pending_action.json"
-    $resultPath  = Join-Path $LiveDir "pending_action_result.json"
-    if (-not (Test-Path -LiteralPath $pendingPath)) { return }
-
-    try {
-        $raw = Get-Content -LiteralPath $pendingPath -Raw -Encoding UTF8
-        $req = $raw | ConvertFrom-Json
-    } catch { return }
-
-    if (-not $req -or -not $req.action) { return }
-
-    # Hết hạn?
-    try {
-        if ($req.expiresAt) {
-            $exp = [datetime]::Parse($req.expiresAt)
-            if ((Get-Date) -gt $exp) {
-                @{ approved = $false; action = $req.action; reason = 'timeout'; at = (Get-Date).ToString('o') } |
-                    ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
-                Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
-                return
-            }
-        }
-    } catch {}
-
-    # Đã có kết quả rồi thì bỏ qua
-    if (Test-Path -LiteralPath $resultPath) {
-        try {
-            $prev = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($prev -and $prev.action -eq $req.action -and $prev.requestId -eq $req.requestId) { return }
-        } catch {}
-    }
-
-    $action = [string]$req.action
-    $title  = if ($req.title) { [string]$req.title } else { "CONFIRM: $action" }
-    $body   = if ($req.body)  { [string]$req.body }  else { "Approve dangerous action?" }
-
-    # Đưa cửa sổ Live lên trước
-    try {
-        $host.UI.RawUI.WindowTitle = "PI NODE LIVE — CONFIRM REQUIRED"
-        # Beep cảnh báo
-        for ($i = 0; $i -lt 3; $i++) { [console]::Beep(900, 180); Start-Sleep -Milliseconds 80 }
-    } catch {}
-
-    Clear-Host
-    Write-Host "################################################################" -ForegroundColor Red
-    Write-Host "   XAC NHAN LENH NGUY HIEM  /  DANGEROUS ACTION CONFIRM" -ForegroundColor Yellow
-    Write-Host "################################################################" -ForegroundColor Red
-    Write-Host ""
-    Write-Host ("  ACTION : {0}" -f $action.ToUpperInvariant()) -ForegroundColor Cyan
-    Write-Host ("  {0}" -f $title) -ForegroundColor White
-    Write-Host ""
-    Write-Host $body -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "################################################################" -ForegroundColor Red
-    Write-Host "  Nhan [Y] de XAC NHAN  |  Nhan [N] de HUY  |  Timeout auto-cancel" -ForegroundColor Yellow
-    Write-Host "################################################################" -ForegroundColor Red
-    Write-Host ""
-
-    $approved = $false
-    $timeoutSec = 90
-    try {
-        if ($req.timeoutSec) { $timeoutSec = [int]$req.timeoutSec }
-    } catch {}
-    if ($timeoutSec -lt 15) { $timeoutSec = 15 }
-    if ($timeoutSec -gt 300) { $timeoutSec = 300 }
-
-    $deadline = (Get-Date).AddSeconds($timeoutSec)
-    Write-Host ("  Cho toi da {0} giay..." -f $timeoutSec) -ForegroundColor DarkGray
-
-    while ((Get-Date) -lt $deadline) {
-        if ([Console]::KeyAvailable) {
-            $key = [Console]::ReadKey($true)
-            $c = $key.KeyChar.ToString().ToLowerInvariant()
-            if ($c -eq 'y' -or $key.Key -eq 'Enter') { $approved = $true; break }
-            if ($c -eq 'n' -or $key.Key -eq 'Escape') { $approved = $false; break }
-        }
-        Start-Sleep -Milliseconds 200
-    }
-
-    $result = @{
-        approved  = [bool]$approved
-        action    = $action
-        requestId = $req.requestId
-        at        = (Get-Date).ToString('o')
-        reason    = $(if ($approved) { 'user_yes' } else { 'user_no_or_timeout' })
-        source    = 'live_window'
-    }
-    ($result | ConvertTo-Json -Compress) | Set-Content -LiteralPath $resultPath -Encoding UTF8
-    Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
-
-    if ($approved) {
-        Write-Host ""
-        Write-Host "  [OK] DA XAC NHAN — Controller se thuc thi." -ForegroundColor Green
-    } else {
-        Write-Host ""
-        Write-Host "  [HUY] Khong xac nhan — lenh bi huy." -ForegroundColor Yellow
-    }
-    Start-Sleep -Seconds 2
-    try { $host.UI.RawUI.WindowTitle = "PI NODE MONITOR LIVE v2" } catch {}
-}
-
-
 Clear-Host
 Write-Host "PI NODE MONITOR LIVE v2  | READ ONLY" -ForegroundColor Cyan
 Write-Host "Stellar/Docker primary | Pi Desktop optional fallback | Hardware 60s" -ForegroundColor DarkGray
 Write-Host ("Data -> {0}" -f $LiveDir) -ForegroundColor DarkGray
 Write-Host ("Temp DLL -> {0}" -f $(if ($Dll) { $Dll } else { "NOT FOUND (optional)" })) -ForegroundColor DarkGray
 
+# Scan policy: core data every 60s; temperature/disk every 5min.
+# Telegram/controller behavior is untouched.
+$ScanNodeSeconds = 60
+$ScanHardwareSeconds = 60
+$ScanTempSeconds = 300
+$ScanDiskSeconds = 300
+$CompatHistorySeconds = 600
+
 $lastNode = Get-Date "2000-01-01"
 $lastHW = Get-Date "2000-01-01"
+$lastTemp = Get-Date "2000-01-01"
+$lastDisk = Get-Date "2000-01-01"
 $lastPorts = Get-Date "2000-01-01"
 $lastSave = Get-Date "2000-01-01"
+$lastCompatHistory = Get-Date "2000-01-01"
+$script:WriteCompatHistory = $true
 
-try {
 while ($true) {
-    # Kiểm tra lệnh nguy hiểm chờ xác nhận từ Controller
-    try { Test-PendingDangerousAction } catch {}
-
     $now = Get-Date
     $didNode = $false
 
-    if (($now - $lastNode).TotalSeconds -ge 60) {
+    if (($now - $lastNode).TotalSeconds -ge $ScanNodeSeconds) {
         Update-NodeData
         $lastNode = $now
         $didNode = $true
     }
 
-    if (($now - $lastHW).TotalSeconds -ge 60) {
-        $h = Get-HardwareSnapshot
+    if (($now - $lastHW).TotalSeconds -ge $ScanHardwareSeconds) {
+        $includeTemp = (($now - $lastTemp).TotalSeconds -ge $ScanTempSeconds)
+        $includeDisk = (($now - $lastDisk).TotalSeconds -ge $ScanDiskSeconds)
+        $h = Get-HardwareSnapshot -IncludeTemp:$includeTemp -IncludeDisk:$includeDisk
         foreach ($k in @("CPU", "RAM", "Temp", "Disk", "Vmmem")) {
             if ($null -ne $h.$k) { $State.$k = $h.$k }
         }
+        if ($includeTemp -and $null -ne $h.Temp) { $lastTemp = $now }
+        if ($includeDisk -and $null -ne $h.Disk) { $lastDisk = $now }
         $lastHW = $now
     }
 
-    if (($now - $lastPorts).TotalSeconds -ge 60) {
+    if (($now - $lastPorts).TotalSeconds -ge $ScanHardwareSeconds) {
         $State.Ports = Get-PortSnapshot
         $d = Get-DockerStatus
         $State.Docker = $d.Docker
@@ -563,8 +433,10 @@ while ($true) {
     $State.Anomaly = Detect-Anomaly
     $State.Updated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
-    if ($didNode -or ($now - $lastSave).TotalSeconds -ge 60) {
+    if ($didNode -or ($now - $lastSave).TotalSeconds -ge $ScanNodeSeconds) {
+        $script:WriteCompatHistory = (($now - $lastCompatHistory).TotalSeconds -ge $CompatHistorySeconds)
         Save-MonitorData
+        if ($script:WriteCompatHistory) { $lastCompatHistory = $now }
         $lastSave = $now
     }
 
@@ -592,16 +464,10 @@ while ($true) {
     Write-Host ("  DOCKER {0}   CTN {1}" -f $State.Docker, $(if ($State.Container) { $State.Container } else { "-" }))
     Write-Host ("  ALERT  {0}" -f $State.Anomaly) -ForegroundColor $ac
     Write-Host "----------------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host ("  Updated {0}  |  Node 60s  |  HW 60s  |  Ctrl+C exit" -f $State.Updated) -ForegroundColor DarkGray
+    Write-Host ("  Updated {0}  |  Node 60s  |  HW 60s  |  Temp/Disk 5m  |  Ctrl+C exit" -f $State.Updated) -ForegroundColor DarkGray
     Write-Host "  Data: Data\PiNodeMonitorLive\latest.json" -ForegroundColor DarkGray
     Write-Host "================================================================" -ForegroundColor DarkCyan
 
     Start-Sleep -Seconds 1
 }
 
-} finally {
-    Write-Host ""
-    Write-Host "Live window closed — stopping related Controller processes..." -ForegroundColor Yellow
-    try { Stop-RelatedOnLiveExit -Reason 'live_window_closed' } catch {}
-    Start-Sleep -Seconds 1
-}
