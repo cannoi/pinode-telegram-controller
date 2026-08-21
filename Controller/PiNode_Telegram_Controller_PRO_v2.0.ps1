@@ -1,7 +1,43 @@
 ﻿if (Test-Path "$PSScriptRoot/Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/Modules/Updated_Core_Logic.ps1" } elseif (Test-Path "$PSScriptRoot/../Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/../Modules/Updated_Core_Logic.ps1" } elseif (Test-Path "$PSScriptRoot/../../Modules/Updated_Core_Logic.ps1") { . "$PSScriptRoot/../../Modules/Updated_Core_Logic.ps1" }
-$SecurityModule = Join-Path (Split-Path -Parent $PSScriptRoot) "Modules\Security_Guard.ps1"
-if (Test-Path -LiteralPath $SecurityModule) { . $SecurityModule }
-# PI NODE TELEGRAM CONTROLLER PRO v11.1 — INTEGRATED LIVE READER
+# --- Load modules at SCRIPT scope (NOT inside a function — PS scopes dot-source to function only) ---
+$script:__PiNodeModCandidates = @()
+try {
+    if ($PSScriptRoot) {
+        $script:__PiNodeModCandidates += (Join-Path $PSScriptRoot 'Modules')
+        $script:__PiNodeModCandidates += (Join-Path (Split-Path -Parent $PSScriptRoot) 'Modules')
+    }
+} catch {}
+try {
+    if ($MyInvocation.MyCommand.Path) {
+        $__sd = Split-Path -Parent $MyInvocation.MyCommand.Path
+        $script:__PiNodeModCandidates += (Join-Path $__sd 'Modules')
+        $script:__PiNodeModCandidates += (Join-Path (Split-Path -Parent $__sd) 'Modules')
+    }
+} catch {}
+$script:__PiNodeModNames = @('Security_Guard.ps1','Admin_Elevate.ps1','Command_Confirm.ps1','Telegram_Menu.ps1','Stop_All_PiNode.ps1')
+$script:__PiNodeModsLoaded = @()
+foreach ($__dir in ($script:__PiNodeModCandidates | Select-Object -Unique)) {
+    if (-not $__dir -or -not (Test-Path -LiteralPath $__dir)) { continue }
+    foreach ($__mn in $script:__PiNodeModNames) {
+        if ($script:__PiNodeModsLoaded -contains $__mn) { continue }
+        $__mp = Join-Path $__dir $__mn
+        if (Test-Path -LiteralPath $__mp) {
+            try {
+                . $__mp
+                $script:__PiNodeModsLoaded += $__mn
+                Write-Host ("Loaded module: " + $__mn) -ForegroundColor Green
+            } catch {
+                Write-Host ("Module load fail " + $__mn + " : " + $_.Exception.Message) -ForegroundColor Yellow
+            }
+        }
+    }
+}
+# Elevate Admin once (if helper loaded)
+if (Get-Command Confirm-AdminRights -ErrorAction SilentlyContinue) {
+    try { $null = Confirm-AdminRights -ScriptPath $MyInvocation.MyCommand.Path } catch {}
+}
+
+# PI NODE TELEGRAM CONTROLLER PRO v11.1 — INTEGRATED LIVE READER + CONFIRM LIVE
 # Windows PowerShell 5.1 - UTF-8 BOM
 # Central Config + integrated scheduler + single-instance mutex
 $ErrorActionPreference = 'Stop'
@@ -14,6 +50,23 @@ try {
 } catch {}
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AppRoot = Split-Path -Parent $ScriptRoot
+# Dot-source modules again from AppRoot\Modules (script scope)
+try {
+    $__modDir = Join-Path $AppRoot 'Modules'
+    if (Test-Path -LiteralPath $__modDir) {
+        foreach ($__mn in @('Security_Guard.ps1','Admin_Elevate.ps1','Command_Confirm.ps1','Telegram_Menu.ps1','Stop_All_PiNode.ps1')) {
+            $__mp = Join-Path $__modDir $__mn
+            if (Test-Path -LiteralPath $__mp) {
+                try {
+                    . $__mp
+                    if ($script:__PiNodeModsLoaded -notcontains $__mn) { $script:__PiNodeModsLoaded += $__mn }
+                } catch {
+                    Write-Host ("Module reload fail " + $__mn + " : " + $_.Exception.Message) -ForegroundColor Yellow
+                }
+            }
+        }
+    }
+} catch {}
 $ConfigFile = Join-Path $AppRoot 'Config\PiNode_Config.ps1'
 if (!(Test-Path -LiteralPath $ConfigFile)) { throw "Khong tim thay Config trung tam: $ConfigFile" }
 . $ConfigFile
@@ -77,15 +130,20 @@ $script:PendingStopController = $false
 $script:PendingStopControllerAt = $null
 $script:Offset = 0
 
+
 function Invoke-Telegram {
     param(
         [Parameter(Mandatory)][string]$Method,
         [hashtable]$Body = @{},
-        [int]$TimeoutSec = $REQUEST_TIMEOUT
+        [int]$TimeoutSec = 0
     )
+    if ($TimeoutSec -le 0) {
+        try { $TimeoutSec = [int]$REQUEST_TIMEOUT } catch { $TimeoutSec = 40 }
+    }
+    if ($TimeoutSec -lt 5) { $TimeoutSec = 5 }
+    if ($TimeoutSec -gt 120) { $TimeoutSec = 120 }
     $uri = "https://api.telegram.org/bot$BOT_TOKEN/$Method"
     try {
-        # Gui JSON UTF-8 de tieng Viet co dau khong bi loi
         $json = $Body | ConvertTo-Json -Compress -Depth 8
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
         return Invoke-RestMethod -Uri $uri -Method Post -Body $bytes -ContentType 'application/json; charset=utf-8' -TimeoutSec $TimeoutSec
@@ -2268,13 +2326,19 @@ function Invoke-NaturalLanguageMessage {
         'DONATE' { Invoke-Donate; break }
         'ASK_HERMES' { Invoke-HermesQuestion -Question $Question; break }
         'MAINTENANCE_CONFIRM' {
-            $script:PendingMaintenance = $true; $script:PendingMaintenanceAt = Get-Date
-            Send-Text "🛠️ BẢO TRÌ — XÁC NHẬN`n`nAI hiểu yêu cầu của bạn là bảo trì hệ thống.`nGửi /confirm trong $ConfirmTimeout giây để thực hiện.`nGửi /cancel để hủy."
+            if (Get-Command Request-DangerousActionConfirm -ErrorAction SilentlyContinue) {
+                Request-DangerousActionConfirm -Action 'maintenance'
+            } else {
+                Send-Text '❌ Module Command_Confirm chưa nạp — không chạy bảo trì qua AI.'
+            }
             break
         }
         'RESET_CONFIRM' {
-            $script:PendingReset = $true; $script:PendingResetAt = Get-Date
-            Send-Text "🛠️ RESET NODE/MẠNG — XÁC NHẬN`n`nAI hiểu yêu cầu là reset mạng + Node.`nGửi /confirmreset trong $ConfirmTimeout giây để thực hiện.`nGửi /cancel để hủy."
+            if (Get-Command Request-DangerousActionConfirm -ErrorAction SilentlyContinue) {
+                Request-DangerousActionConfirm -Action 'reset'
+            } else {
+                Send-Text '❌ Module Command_Confirm chưa nạp — không chạy reset qua AI.'
+            }
             break
         }
         default {
@@ -3596,9 +3660,11 @@ function Handle-Message {
         return
     }
     if ([string]::IsNullOrWhiteSpace($text)) { return }
-    if (-not (Test-PiNodeRateLimit -Key $chat -MaxRequests 30 -WindowSeconds 60)) {
-        Write-Log "Rate limit: bo qua tin nhan tu chat whitelist $chat"
-        return
+    if (Get-Command Test-PiNodeRateLimit -ErrorAction SilentlyContinue) {
+        if (-not (Test-PiNodeRateLimit -Key $chat -MaxRequests 30 -WindowSeconds 60)) {
+            Write-Log "Rate limit: bo qua tin nhan tu chat whitelist $chat"
+            return
+        }
     }
 
     # Ghi nhận tin người dùng (lệnh hoặc tự nhiên) để bộ nhớ hội thoại + phân tích sau này
@@ -3612,6 +3678,30 @@ function Handle-Message {
     $script:RememberReply = $true
 
     switch -Regex ($text) {
+        '(?i)^/start(@\w+)?$'      {
+            if (Get-Command Get-PiNodeStartMenuText -ErrorAction SilentlyContinue) {
+                Send-Text -Text (Get-PiNodeStartMenuText) -WithKeyboard
+            } else {
+                Send-Text -Text (Show-Help) -WithKeyboard
+            }
+            break
+        }
+        '(?i)^/confirmmenu(@\w+)?$' {
+            if (Get-Command Complete-MenuConfirm -ErrorAction SilentlyContinue) {
+                Complete-MenuConfirm | Out-Null
+            } else {
+                Send-Text '⚠️ Module Telegram_Menu chưa nạp.'
+            }
+            break
+        }
+        '(?i)^/skipmenu(@\w+)?$' {
+            if (Get-Command Skip-MenuConfirm -ErrorAction SilentlyContinue) {
+                Skip-MenuConfirm
+            } else {
+                Send-Text '⚠️ Module Telegram_Menu chưa nạp.'
+            }
+            break
+        }
         '(?i)^/help(@\w+)?$'       { Send-Text -Text (Show-Help) -WithKeyboard; break }
         '(?i)^/donate(@\w+)?$'     { Invoke-Donate; break }
         '(?i)^/screenshot(@\w+)?$' { Invoke-Screenshot; break }
@@ -3640,22 +3730,16 @@ function Handle-Message {
             $shellArgs = if ($Matches.Count -gt 2 -and $Matches[2]) { $Matches[2].Trim() } else { '' }
             if ([string]::IsNullOrWhiteSpace($shellArgs)) { Send-Text "⚠️ Dùng: /$shellType <lệnh>"; break }
             if ($shellArgs.Length -gt 2000) { Send-Text "⚠️ Lệnh quá dài (tối đa 2000 ký tự)."; break }
-            $script:PendingShell = $true
-            $script:PendingShellAt = Get-Date
-            $script:PendingShellType = $shellType
-            $script:PendingShellCommand = $shellArgs
-            Send-Text "⚠️ LỆNH TỪ XA — XÁC NHẬN BẮT BUỘC`n━━━━━━━━━━━━━━`n[$($shellType.ToUpperInvariant())] $shellArgs`n`nĐây là quyền thực thi hệ thống.`nGửi /confirmshell trong $ConfirmTimeout giây để chạy.`nGửi /cancel để hủy."
+            # Xác nhận trên cửa sổ Live (Y/N) — giống /reset /maintenance
+            if (Get-Command Request-ShellLiveConfirm -ErrorAction SilentlyContinue) {
+                Request-ShellLiveConfirm -ShellType $shellType -CommandText $shellArgs | Out-Null
+            } else {
+                Send-Text '❌ Module Command_Confirm chưa nạp. Không chạy /ps /cmd an toàn.'
+            }
             break
         }
         '(?i)^/confirmshell(@\w+)?$' {
-            if ($script:PendingShell -and $script:PendingShellAt -and ((Get-Date) - $script:PendingShellAt).TotalSeconds -le $ConfirmTimeout -and $script:PendingShellType -and $script:PendingShellCommand) {
-                $st = $script:PendingShellType; $sc = $script:PendingShellCommand
-                $script:PendingShell = $false; $script:PendingShellAt = $null; $script:PendingShellType = $null; $script:PendingShellCommand = $null
-                Invoke-ShellCommand -ShellType $st -CommandText $sc
-            } else {
-                $script:PendingShell = $false; $script:PendingShellAt = $null; $script:PendingShellType = $null; $script:PendingShellCommand = $null
-                Send-Text "⚠️ Hết thời gian xác nhận hoặc không có lệnh đang chờ."
-            }
+            Send-Text "ℹ️ /ps và /cmd giờ xác nhận trên cửa sổ Live (Y/N), không dùng /confirmshell.`nGửi lại /ps hoặc /cmd rồi nhấn Y trên Live Monitor."
             break
         }
         '(?i)^/insights(@\w+)?$'   {
@@ -3704,23 +3788,12 @@ function Handle-Message {
             break
         }
         '(?i)^/maintenance(@\w+)?$' {
-            $script:PendingMaintenance = $true
-            $script:PendingMaintenanceAt = Get-Date
-            Send-Text @"
-🛠️ BẢO TRÌ ĐỊNH KỲ — XÁC NHẬN
-━━━━━━━━━━━━━━
-Sẽ thực hiện:
-• Tắt app rác (Chrome, Edge…) — không đụng Pi/Docker
-• Xóa file tạm, cache
-• Dọn Docker volume / image treo
-• Làm mới DNS, chống ngủ máy
-• TRIM ổ đĩa (nếu CPU rảnh)
-• SFC/DISM nếu đúng lịch đầu tháng
-
-Gửi /confirm trong $ConfirmTimeout giây để chạy.
-Gửi /cancel để hủy.
-⏳ Đang chờ xác nhận...
-"@
+            # BẮT BUỘC xác nhận trên cửa sổ Live (Y/N) — mọi lần, kể cả sau restart
+            if (-not (Get-Command Request-DangerousActionConfirm -ErrorAction SilentlyContinue)) {
+                Send-Text '❌ Module Command_Confirm chưa nạp. Không thể chạy /maintenance an toàn.'
+                break
+            }
+            Request-DangerousActionConfirm -Action 'maintenance'
             break
         }
         '(?i)^/confirm(@\w+)?$' {
@@ -3737,27 +3810,12 @@ Gửi /cancel để hủy.
         }
         
         '(?i)^/reset(@\w+)?$' {
-            $script:PendingReset = $true
-            $script:PendingResetAt = Get-Date
-            Send-Text @"
-🛠️ RESET MẠNG + NODE — XÁC NHẬN
-━━━━━━━━━━━━━━
-Dùng khi: không đồng bộ, cổng đóng, mất mạng.
-
-Sẽ thực hiện:
-1) Khắc phục sự cố mạng (troubleshoot)
-2) Gán IP tĩnh = IP máy đang dùng
-3) Mở firewall cổng 31401–31410
-4) Reset Docker / WSL (tạo lại sạch)
-5) Bật chống ngủ máy, ưu tiên Docker
-
-⚠️ Docker sẽ tạm dừng rồi tạo lại — cần mở lại Pi Node.
-Cần quyền Administrator.
-
-Gửi /confirmreset trong $ConfirmTimeout giây để chạy.
-Gửi /cancel để hủy.
-⏳ Đang chờ xác nhận...
-"@
+            # BẮT BUỘC xác nhận trên cửa sổ Live (Y/N) — mọi lần, kể cả sau restart
+            if (-not (Get-Command Request-DangerousActionConfirm -ErrorAction SilentlyContinue)) {
+                Send-Text '❌ Module Command_Confirm chưa nạp. Không thể chạy /reset an toàn.'
+                break
+            }
+            Request-DangerousActionConfirm -Action 'reset'
             break
         }
         '(?i)^/confirmreset(@\w+)?$' {
@@ -3785,7 +3843,9 @@ Gửi /cancel để hủy.
 Sẽ dừng polling Telegram của Controller.
 Cửa sổ Live Data vẫn chạy bình thường (số liệu vẫn cập nhật).
 
-Gửi /confirmstop trong $ConfirmTimeout giây để tắt.
+Sẽ tắt: Controller + cửa sổ Live Data + mọi script liên quan app này.
+
+Gửi /confirmstop trong $ConfirmTimeout giây để tắt toàn bộ.
 Gửi /cancel để hủy.
 ⏳ Đang chờ xác nhận...
 "@
@@ -3795,10 +3855,15 @@ Gửi /cancel để hủy.
             if ($script:PendingStopController -and $script:PendingStopControllerAt -and ((Get-Date) - $script:PendingStopControllerAt).TotalSeconds -le $ConfirmTimeout) {
                 $script:PendingStopController = $false
                 $script:PendingStopControllerAt = $null
-                Send-Text "🛑 Controller đang tắt sạch.`nCửa sổ Live Data vẫn chạy. Dùng Start_Controller.bat để bật lại."
-                Write-Log "User confirmed /confirmstop — exiting Controller"
-                Start-Sleep -Seconds 1
-                exit 0
+                Send-Text "🛑 Đang tắt toàn bộ Pi Node Controller + Live Data + script liên quan..."
+                Write-Log "User confirmed /confirmstop — Stop-AllPiNodeRelated"
+                Start-Sleep -Milliseconds 500
+                if (Get-Command Stop-AllPiNodeRelated -ErrorAction SilentlyContinue) {
+                    Stop-AllPiNodeRelated -IncludeSelf -Reason 'telegram_confirmstop'
+                } else {
+                    try { Cleanup-Controller } catch {}
+                    exit 0
+                }
             } else {
                 $script:PendingStopController = $false
                 $script:PendingStopControllerAt = $null
@@ -3819,6 +3884,9 @@ Gửi /cancel để hủy.
             $script:PendingResetAt = $null
             $script:PendingStopController = $false
             $script:PendingStopControllerAt = $null
+            if (Get-Command Cancel-PendingConfirms -ErrorAction SilentlyContinue) {
+                Cancel-PendingConfirms
+            }
             Send-Text "✅ Đã hủy thao tác đang chờ."
             break
         }
@@ -3923,6 +3991,28 @@ try {
   }
 } catch { Write-Log "Registered dump loi: $($_.Exception.Message)" }
 Invoke-Telegram 'deleteWebhook' @{} | Out-Null
+
+# Mốc thời gian khởi động — menu bootstrap chờ ≥60s ổn định rồi quét 1 lần
+$script:ControllerStartedAt = Get-Date
+$script:MenuBootstrapDone = $false
+$script:MenuPromptSent = $false
+$script:MenuPendingConfirm = $false
+# Báo cáo module đã nạp (debug lỗi 'Command_Confirm chưa nạp')
+try {
+    $modStatus = @()
+    foreach ($fn in @('Request-DangerousActionConfirm','Complete-MenuConfirm','Complete-LiveWindowConfirmTick','Stop-AllPiNodeRelated','Confirm-AdminRights','Test-PiNodeRateLimit')) {
+        $modStatus += if (Get-Command $fn -ErrorAction SilentlyContinue) { "$fn=OK" } else { "$fn=MISSING" }
+    }
+    Write-Log ("Modules: " + ($modStatus -join ' | '))
+    if ($script:__PiNodeModsLoaded) {
+        Write-Log ("Modules files: " + ($script:__PiNodeModsLoaded -join ', '))
+    }
+} catch {}
+
+# Menu bot commands: KHÔNG tự đăng ký lúc khởi động.
+# Sau 60s ổn định, quét 1 lần → nếu chưa có menu thì hỏi user xác nhận (/confirmmenu).
+# (Xử lý trong vòng lặp chính qua Invoke-MenuBootstrapOnce)
+
 # Menu mo dau: chi gui 1 lan (kem ung ho). Lan sau chi bao san sang ngan.
 try {
   $welcomeFlag = Join-Path $StateDir 'welcome_sent.flag'
@@ -3981,20 +4071,93 @@ Bot giúp bạn giám sát • bảo trì • xử lý sự cố Pi Node trực 
   Write-Log "Welcome loi: $($_.Exception.Message)"
 }
 
+# ---- Resilient main loop: Telegram first, never block forever on scheduler/Live ----
+$script:LastPollOkAt = Get-Date
+$script:SchedulerSkipUntil = Get-Date
+$script:ConsecutivePollFail = 0
+
 while ($true) {
     try {
-        Invoke-SchedulerTick
-        $body = @{ timeout=$POLL_TIMEOUT; offset=$script:Offset; allowed_updates=@('message','callback_query') }
-        $r = Invoke-Telegram 'getUpdates' $body ($POLL_TIMEOUT + 10)
-        if ($r -and $r.ok -and $r.result) {
-            foreach ($u in $r.result) {
-                $script:Offset = [int64]$u.update_id + 1
-                if ($u.callback_query) { Handle-CallbackQuery $u.callback_query }
-                elseif ($u.message) { Handle-Message $u }
+        # 1) Always poll Telegram FIRST so commands never freeze behind monitor/scheduler
+        $pollSec = 20
+        try {
+            if ($POLL_TIMEOUT -gt 0 -and $POLL_TIMEOUT -lt 60) { $pollSec = [int]$POLL_TIMEOUT }
+        } catch {}
+        if ($pollSec -gt 25) { $pollSec = 25 }
+        if ($pollSec -lt 5) { $pollSec = 5 }
+
+        $body = @{ timeout = $pollSec; offset = $script:Offset; allowed_updates = @('message','callback_query') }
+        $r = $null
+        try {
+            $r = Invoke-Telegram 'getUpdates' $body ($pollSec + 15)
+        } catch {
+            Write-Log ("getUpdates error: " + $_.Exception.Message)
+            $r = $null
+        }
+
+        if ($r -and $r.ok) {
+            $script:LastPollOkAt = Get-Date
+            $script:ConsecutivePollFail = 0
+            if ($r.result) {
+                foreach ($u in $r.result) {
+                    try {
+                        $script:Offset = [int64]$u.update_id + 1
+                        if ($u.callback_query) {
+                            Handle-CallbackQuery $u.callback_query
+                        } elseif ($u.message) {
+                            Handle-Message $u
+                        }
+                    } catch {
+                        Write-Log ("Handle update error: " + $_.Exception.Message)
+                    }
+                }
+            }
+        } else {
+            $script:ConsecutivePollFail++
+            if ($script:ConsecutivePollFail -ge 3) {
+                Write-Log ("getUpdates failed x" + $script:ConsecutivePollFail + " - short sleep then retry")
+                Start-Sleep -Seconds 3
             }
         }
+
+        # 2) Non-blocking Live confirm completion (Y/N from Live window)
+        if (Get-Command Complete-LiveWindowConfirmTick -ErrorAction SilentlyContinue) {
+            try { Complete-LiveWindowConfirmTick } catch {
+                Write-Log ("LiveConfirm tick: " + $_.Exception.Message)
+            }
+        }
+
+        # 3) Menu bootstrap once (after ~45s) - must not block
+        if (Get-Command Invoke-MenuBootstrapOnce -ErrorAction SilentlyContinue) {
+            try { Invoke-MenuBootstrapOnce } catch {}
+        }
+
+        # 4) Scheduler with soft time-budget (skip if last run was heavy / failed)
+        $now = Get-Date
+        if ($now -ge $script:SchedulerSkipUntil) {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            try {
+                Invoke-SchedulerTick
+            } catch {
+                Write-Log ("SchedulerTick error: " + $_.Exception.Message)
+                # Back off 60s so a stuck monitor does not freeze every loop
+                $script:SchedulerSkipUntil = $now.AddSeconds(60)
+            }
+            $sw.Stop()
+            if ($sw.Elapsed.TotalSeconds -gt 20) {
+                Write-Log ("SchedulerTick slow: " + [int]$sw.Elapsed.TotalSeconds + "s - backing off 30s")
+                $script:SchedulerSkipUntil = $now.AddSeconds(30)
+            }
+        }
+
+        # 5) Watchdog: if no successful poll for 3 minutes, log and continue (do not exit)
+        if (((Get-Date) - $script:LastPollOkAt).TotalSeconds -gt 180) {
+            Write-Log 'Watchdog: no successful getUpdates for >180s - continuing'
+            $script:LastPollOkAt = Get-Date
+            Start-Sleep -Seconds 2
+        }
     } catch {
-        Write-Log "Vong lap loi: $($_.Exception.Message)"
+        Write-Log ("Vong lap loi: " + $_.Exception.Message)
         Start-Sleep -Seconds 5
     }
 }
