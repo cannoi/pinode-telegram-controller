@@ -46,6 +46,54 @@ foreach ($cand in @(
 }
 
 New-Item -ItemType Directory -Force -Path $LiveDir, $HistDir, $HourlyDir, $DailyDir | Out-Null
+
+
+# ============================================================
+# Khi đóng cửa sổ Live → tắt toàn bộ Controller + script liên quan
+# ============================================================
+function Stop-RelatedOnLiveExit {
+    param([string]$Reason = 'live_window_closed')
+    $myPid = $PID
+    $patterns = @(
+        'PiNode_Telegram_Controller_PRO',
+        'PiNodeMonitorLive_Service\.ps1',
+        'PiNodeMonitorLive_Once\.ps1'
+    )
+    try {
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.ProcessId -ne $myPid -and
+                $_.CommandLine -and
+                ($patterns | Where-Object { $_.CommandLine -match $_ })
+            } |
+            ForEach-Object {
+                try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+            }
+    } catch {}
+    try {
+        $pidCtrl = Join-Path $AppRoot 'State\controller.pid'
+        if (Test-Path -LiteralPath $pidCtrl) {
+            $op = 0
+            try { $op = [int]((Get-Content -LiteralPath $pidCtrl -Raw).Trim()) } catch {}
+            if ($op -gt 0 -and $op -ne $myPid) {
+                try { Stop-Process -Id $op -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            Remove-Item -LiteralPath $pidCtrl -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+    try {
+        if ($PidPath -and (Test-Path -LiteralPath $PidPath)) {
+            Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
+try {
+    Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
+        try { Stop-RelatedOnLiveExit -Reason 'live_exiting' } catch {}
+    } | Out-Null
+} catch {}
+
 try { Set-Content -LiteralPath $PidPath -Value $PID -Encoding ASCII } catch {}
 
 # REBUILT State shape
@@ -361,6 +409,115 @@ function Save-MonitorData {
     } catch {}
 }
 
+
+# ============================================================
+# Xác nhận lệnh nguy cơ cao từ Controller (cửa sổ Live hiển thị)
+# File: Data/PiNodeMonitorLive/pending_action.json
+# Kết quả: Data/PiNodeMonitorLive/pending_action_result.json
+# ============================================================
+function Test-PendingDangerousAction {
+    $pendingPath = Join-Path $LiveDir "pending_action.json"
+    $resultPath  = Join-Path $LiveDir "pending_action_result.json"
+    if (-not (Test-Path -LiteralPath $pendingPath)) { return }
+
+    try {
+        $raw = Get-Content -LiteralPath $pendingPath -Raw -Encoding UTF8
+        $req = $raw | ConvertFrom-Json
+    } catch { return }
+
+    if (-not $req -or -not $req.action) { return }
+
+    # Hết hạn?
+    try {
+        if ($req.expiresAt) {
+            $exp = [datetime]::Parse($req.expiresAt)
+            if ((Get-Date) -gt $exp) {
+                @{ approved = $false; action = $req.action; reason = 'timeout'; at = (Get-Date).ToString('o') } |
+                    ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
+                Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
+                return
+            }
+        }
+    } catch {}
+
+    # Đã có kết quả rồi thì bỏ qua
+    if (Test-Path -LiteralPath $resultPath) {
+        try {
+            $prev = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($prev -and $prev.action -eq $req.action -and $prev.requestId -eq $req.requestId) { return }
+        } catch {}
+    }
+
+    $action = [string]$req.action
+    $title  = if ($req.title) { [string]$req.title } else { "CONFIRM: $action" }
+    $body   = if ($req.body)  { [string]$req.body }  else { "Approve dangerous action?" }
+
+    # Đưa cửa sổ Live lên trước
+    try {
+        $host.UI.RawUI.WindowTitle = "PI NODE LIVE — CONFIRM REQUIRED"
+        # Beep cảnh báo
+        for ($i = 0; $i -lt 3; $i++) { [console]::Beep(900, 180); Start-Sleep -Milliseconds 80 }
+    } catch {}
+
+    Clear-Host
+    Write-Host "################################################################" -ForegroundColor Red
+    Write-Host "   XAC NHAN LENH NGUY HIEM  /  DANGEROUS ACTION CONFIRM" -ForegroundColor Yellow
+    Write-Host "################################################################" -ForegroundColor Red
+    Write-Host ""
+    Write-Host ("  ACTION : {0}" -f $action.ToUpperInvariant()) -ForegroundColor Cyan
+    Write-Host ("  {0}" -f $title) -ForegroundColor White
+    Write-Host ""
+    Write-Host $body -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "################################################################" -ForegroundColor Red
+    Write-Host "  Nhan [Y] de XAC NHAN  |  Nhan [N] de HUY  |  Timeout auto-cancel" -ForegroundColor Yellow
+    Write-Host "################################################################" -ForegroundColor Red
+    Write-Host ""
+
+    $approved = $false
+    $timeoutSec = 90
+    try {
+        if ($req.timeoutSec) { $timeoutSec = [int]$req.timeoutSec }
+    } catch {}
+    if ($timeoutSec -lt 15) { $timeoutSec = 15 }
+    if ($timeoutSec -gt 300) { $timeoutSec = 300 }
+
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    Write-Host ("  Cho toi da {0} giay..." -f $timeoutSec) -ForegroundColor DarkGray
+
+    while ((Get-Date) -lt $deadline) {
+        if ([Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true)
+            $c = $key.KeyChar.ToString().ToLowerInvariant()
+            if ($c -eq 'y' -or $key.Key -eq 'Enter') { $approved = $true; break }
+            if ($c -eq 'n' -or $key.Key -eq 'Escape') { $approved = $false; break }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+
+    $result = @{
+        approved  = [bool]$approved
+        action    = $action
+        requestId = $req.requestId
+        at        = (Get-Date).ToString('o')
+        reason    = $(if ($approved) { 'user_yes' } else { 'user_no_or_timeout' })
+        source    = 'live_window'
+    }
+    ($result | ConvertTo-Json -Compress) | Set-Content -LiteralPath $resultPath -Encoding UTF8
+    Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
+
+    if ($approved) {
+        Write-Host ""
+        Write-Host "  [OK] DA XAC NHAN — Controller se thuc thi." -ForegroundColor Green
+    } else {
+        Write-Host ""
+        Write-Host "  [HUY] Khong xac nhan — lenh bi huy." -ForegroundColor Yellow
+    }
+    Start-Sleep -Seconds 2
+    try { $host.UI.RawUI.WindowTitle = "PI NODE MONITOR LIVE v2" } catch {}
+}
+
+
 Clear-Host
 Write-Host "PI NODE MONITOR LIVE v2  | READ ONLY" -ForegroundColor Cyan
 Write-Host "Stellar/Docker primary | Pi Desktop optional fallback | Hardware 60s" -ForegroundColor DarkGray
@@ -372,7 +529,11 @@ $lastHW = Get-Date "2000-01-01"
 $lastPorts = Get-Date "2000-01-01"
 $lastSave = Get-Date "2000-01-01"
 
+try {
 while ($true) {
+    # Kiểm tra lệnh nguy hiểm chờ xác nhận từ Controller
+    try { Test-PendingDangerousAction } catch {}
+
     $now = Get-Date
     $didNode = $false
 
@@ -438,3 +599,9 @@ while ($true) {
     Start-Sleep -Seconds 1
 }
 
+} finally {
+    Write-Host ""
+    Write-Host "Live window closed — stopping related Controller processes..." -ForegroundColor Yellow
+    try { Stop-RelatedOnLiveExit -Reason 'live_window_closed' } catch {}
+    Start-Sleep -Seconds 1
+}
