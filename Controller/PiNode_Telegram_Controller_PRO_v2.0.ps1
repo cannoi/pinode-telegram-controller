@@ -14,7 +14,7 @@ try {
         $script:__PiNodeModCandidates += (Join-Path (Split-Path -Parent $__sd) 'Modules')
     }
 } catch {}
-$script:__PiNodeModNames = @('Security_Guard.ps1','Admin_Elevate.ps1','Command_Confirm.ps1','Telegram_Menu.ps1','Stop_All_PiNode.ps1')
+$script:__PiNodeModNames = @('Security_Guard.ps1','Admin_Elevate.ps1','Command_Confirm.ps1','Telegram_Menu.ps1','Stop_All_PiNode.ps1','Smart_Pipeline.ps1')
 $script:__PiNodeModsLoaded = @()
 foreach ($__dir in ($script:__PiNodeModCandidates | Select-Object -Unique)) {
     if (-not $__dir -or -not (Test-Path -LiteralPath $__dir)) { continue }
@@ -54,7 +54,7 @@ $AppRoot = Split-Path -Parent $ScriptRoot
 try {
     $__modDir = Join-Path $AppRoot 'Modules'
     if (Test-Path -LiteralPath $__modDir) {
-        foreach ($__mn in @('Security_Guard.ps1','Admin_Elevate.ps1','Command_Confirm.ps1','Telegram_Menu.ps1','Stop_All_PiNode.ps1')) {
+        foreach ($__mn in @('Security_Guard.ps1','Admin_Elevate.ps1','Command_Confirm.ps1','Telegram_Menu.ps1','Stop_All_PiNode.ps1','Smart_Pipeline.ps1')) {
             $__mp = Join-Path $__modDir $__mn
             if (Test-Path -LiteralPath $__mp) {
                 try {
@@ -1941,6 +1941,8 @@ function Get-NaturalLanguageFallbackIntent {
     }
     if ($q -match 'ung dung nay|ứng dụng này|app nay|app này|controller nay|controller này|cai dat|cài đặt|file nao|file nào|script nao|script nào|lam gi|làm gì|su dung|sử dụng|chuc nang|chức năng') { return 'KNOWLEDGE' }
     if ($q -match 'hermes|phan tich sau|phân tích sâu|hoi ai|hỏi ai') { return 'ASK_HERMES' }
+    if ($q -match 'tai sao|tại sao|vi sao|vì sao|lech block|lệch block|cham dong bo|chậm đồng bộ|bat thuong|bất thường|su co|sự cố') { return 'DIAGNOSTIC' }
+    if ($q -match 'on dinh|ổn định|node on|node ổn|may on|máy ổn') { return 'STATUS' }
     return 'UNKNOWN'
 }
 
@@ -2228,11 +2230,33 @@ function Invoke-NaturalLanguageMessage {
     }
 
     switch ($first) {
-        'STATUS' { Send-Text -Text (Get-NodeStatus) -WithKeyboard; break }
+        'STATUS' {
+            if (Get-Command Invoke-SmartQuestionPipeline -ErrorAction SilentlyContinue) {
+                $smart = Invoke-SmartQuestionPipeline -Question $Question
+                if (-not [string]::IsNullOrWhiteSpace($smart)) { Send-Text -Text $smart -WithKeyboard }
+                else { Send-Text -Text (Get-NodeStatus) -WithKeyboard }
+            } else { Send-Text -Text (Get-NodeStatus) -WithKeyboard }
+            break
+        }
+        'HEALTH' {
+            if (Get-Command Invoke-SmartQuestionPipeline -ErrorAction SilentlyContinue) {
+                $smart = Invoke-SmartQuestionPipeline -Question $Question
+                if (-not [string]::IsNullOrWhiteSpace($smart)) { Send-Text -Text $smart -WithKeyboard }
+                else { Send-Text -Text (Get-NodeStatus) -WithKeyboard }
+            } else { Send-Text -Text (Get-NodeStatus) -WithKeyboard }
+            break
+        }
         'MONITOR' { Invoke-BackupMonitor; break }
         'SCREENSHOT' { Invoke-Screenshot; break }
         'SETTINGS' { Send-Text (Get-SettingsMenu); break }
-        'NODE' { Send-Text (Get-LiveNodeDetail); break }
+        'NODE' {
+            if (Get-Command Invoke-SmartQuestionPipeline -ErrorAction SilentlyContinue) {
+                $smart = Invoke-SmartQuestionPipeline -Question $Question
+                if (-not [string]::IsNullOrWhiteSpace($smart)) { Send-Text -Text $smart -WithKeyboard }
+                else { Send-Text -Text (Get-LiveNodeDetail) -WithKeyboard }
+            } else { Send-Text -Text (Get-LiveNodeDetail) -WithKeyboard }
+            break
+        }
         'PEERS' { Send-Text (Get-PeersDetail); break }
         'REPORT' {
             $days=Get-RequestedPeriodDays -Question $Question
@@ -2251,6 +2275,11 @@ function Invoke-NaturalLanguageMessage {
         'STATISTICS' {
             $days=Get-RequestedPeriodDays -Question $Question
             $qLow=$Question.ToLowerInvariant()
+            # Cau hoi hien tai / xu huong ngan: Smart Pipeline (trend + rule + AI)
+            if ($qLow -match 'nhiet|nong|temperature|temp|ram|bo nho|cpu' -and $days -le 2 -and (Get-Command Invoke-SmartQuestionPipeline -ErrorAction SilentlyContinue)) {
+                $smart = Invoke-SmartQuestionPipeline -Question $Question
+                if (-not [string]::IsNullOrWhiteSpace($smart)) { Send-Text $smart; break }
+            }
             # Câu hỏi chỉ số cụ thể (nhiệt/RAM/CPU): dùng thống kê động trước (số liệu chính xác)
             if($qLow -match 'nhiệt|nhiet|nóng|nong|temperature|temp|ram|bộ nhớ|bo nho|cpu'){
                 $stats = Get-DynamicStatistics -Question $Question -Days $days
@@ -2299,7 +2328,15 @@ function Invoke-NaturalLanguageMessage {
             $a=Invoke-HistoricalAIAnalysis -Question $Question -Days 7
             if($a){Send-Text $a}else{Send-Text (Get-NodeReport -Days 7)}; break
         }
-        'DOCKER' { Send-Text (Get-DockerStatus); break }
+        'DOCKER' {
+            $qLow = $Question.ToLowerInvariant()
+            if ($qLow -match 'van de|v[aấ]n [dđ][eề]|loi|l[oỗ]i|sao|the nao|th[eế] n[aà]o|on khong' -and (Get-Command Invoke-SmartQuestionPipeline -ErrorAction SilentlyContinue)) {
+                $smart = Invoke-SmartQuestionPipeline -Question $Question
+                if (-not [string]::IsNullOrWhiteSpace($smart)) { Send-Text $smart; break }
+            }
+            Send-Text (Get-DockerStatus)
+            break
+        }
         'DISK' { Send-Text (Get-DiskStatus); break }
         'EVIDENCE' { Invoke-LiveEvidence; break }
         'LOGS' { Send-Text (Get-Logs); break }
@@ -2316,7 +2353,14 @@ function Invoke-NaturalLanguageMessage {
             }
             break
         }
-        'DIAGNOSTIC' { Invoke-DiagnosticAI -UserQuestion $Question; break }
+        'DIAGNOSTIC' {
+            if (Get-Command Invoke-SmartQuestionPipeline -ErrorAction SilentlyContinue) {
+                $smart = Invoke-SmartQuestionPipeline -Question $Question
+                if (-not [string]::IsNullOrWhiteSpace($smart)) { Send-Text $smart; break }
+            }
+            Invoke-DiagnosticAI -UserQuestion $Question
+            break
+        }
         'CLEANRAM' {
             $script:PendingCleanRam = $true; $script:PendingCleanRamAt = Get-Date
             Send-Text "🧹 DỌN RAM — XÁC NHẬN`n`nAI hiểu yêu cầu là chạy tác vụ dọn RAM/cache/DNS đã đăng ký.`nGửi /confirmcleanram trong $ConfirmTimeout giây để thực hiện.`nGửi /cancel để hủy."
@@ -4000,7 +4044,7 @@ $script:MenuPendingConfirm = $false
 # Báo cáo module đã nạp (debug lỗi 'Command_Confirm chưa nạp')
 try {
     $modStatus = @()
-    foreach ($fn in @('Request-DangerousActionConfirm','Complete-MenuConfirm','Complete-LiveWindowConfirmTick','Stop-AllPiNodeRelated','Confirm-AdminRights','Test-PiNodeRateLimit')) {
+    foreach ($fn in @('Request-DangerousActionConfirm','Complete-MenuConfirm','Complete-LiveWindowConfirmTick','Stop-AllPiNodeRelated','Confirm-AdminRights','Test-PiNodeRateLimit','Invoke-SmartQuestionPipeline')) {
         $modStatus += if (Get-Command $fn -ErrorAction SilentlyContinue) { "$fn=OK" } else { "$fn=MISSING" }
     }
     Write-Log ("Modules: " + ($modStatus -join ' | '))
